@@ -1,13 +1,13 @@
 ---
 name: indian-market-trading-master
-description: "Master Orchestration Skill for Agentic Intraday Trading in Indian Markets (NSE/BSE). Coordinates session timing, risk guardrails (1-2% max risk, MIS square-off at 15:20 IST), strategy selection matrix across all 7 Flattrade intraday setups, and trade journaling."
+description: "Master Orchestration Skill for Agentic Intraday Trading in Indian Markets (NSE/BSE). Coordinates session timing, risk guardrails (1-2% max risk, MIS square-off at 15:20 IST), strategy selection across intraday setups, and trade journaling."
 strategy_type: "orchestrator"
 market: "NSE Equities, NIFTY & BANKNIFTY Derivatives"
 ---
 
 # Indian Intraday Market Orchestration & Risk Master Guide
 
-This master skill orchestrates the agentic execution of all 7 intraday strategies analyzed from Flattrade:
+This master skill orchestrates the agentic execution of the intraday strategies analyzed from Flattrade:
 1. **Momentum Trading** (09:15 - 10:15 IST)
 2. **Breakout Trading** (10:30 - 13:30 IST)
 3. **Reversal Trading / Mean Reversion** (Extreme moves, fading to VWAP)
@@ -15,6 +15,7 @@ This master skill orchestrates the agentic execution of all 7 intraday strategie
 5. **Scalping** (1-minute micro tick captures on SBIN, Nifty options)
 6. **Gap and Go** (Pre-open scan, 09:15 - 09:45 IST)
 7. **Opening Range Breakout / ORB** (09:30 - 11:00 IST)
+8. **Classic Pivot + VWAP + 20 EMA** (documented in its standalone skill; not currently wired into the live scanner)
 
 ---
 

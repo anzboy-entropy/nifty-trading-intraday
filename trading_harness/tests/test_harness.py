@@ -5,6 +5,7 @@ Verifies Risk Engine, Clock Phases, 7 Strategy Evaluators, Broker Fills, and Cla
 
 import unittest
 import os
+import tempfile
 from datetime import datetime
 
 from trading_harness.config import TradingHarnessConfig, RiskConfig, StatutoryFeeStructure, MarketSessionConfig
@@ -223,13 +224,68 @@ class TestTradingHarness(unittest.TestCase):
         
         # Test appending to running file
         collector.append_to_running_file(sample_records)
-        self.assertTrue(os.path.exists(collector.running_file_path))
-        
+        daily_path = collector.daily_file_path("2026-11-04")
+        self.assertTrue(os.path.exists(daily_path))
+
         # Test archiving running file
         archived_path = collector.archive_running_file(target_date_str="2026-11-04")
         self.assertIsNotNone(archived_path)
         self.assertTrue(os.path.exists(archived_path))
-        self.assertFalse(os.path.exists(collector.running_file_path))
+        self.assertFalse(os.path.exists(daily_path))
+
+    def test_nse_collector_archives_expired_date_files(self):
+        from trading_harness.market_data.nse_live_collector import NSELiveCollector, IST
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            live_dir = os.path.join(temp_dir, "live")
+            archive_dir = os.path.join(temp_dir, "archive")
+            collector = NSELiveCollector(live_dir=live_dir, archive_dir=archive_dir)
+            collector.append_to_running_file([{
+                "snapshot_ist": "2026-11-04 10:00:00",
+                "symbol": "NIFTY 50",
+                "is_index": True,
+                "company_name": "NIFTY 50 INDEX",
+                "last_price": 24000.0,
+                "change": 100.0,
+                "p_change": 0.4,
+                "open": 23900.0,
+                "day_high": 24000.0,
+                "day_low": 23900.0,
+                "prev_close": 23900.0,
+                "volume": 1000000,
+                "total_traded_value": 50000000.0,
+                "year_high": 26000.0,
+                "year_low": 22000.0,
+                "nse_timestamp": "04-Nov-2026 10:00:00",
+            }])
+
+            archived = collector.archive_expired_files(
+                datetime(2026, 11, 5, 9, 0, tzinfo=IST)
+            )
+
+            self.assertEqual(
+                archived,
+                [os.path.join(archive_dir, "nifty50_2026-11-04.csv")],
+            )
+            self.assertFalse(os.path.exists(collector.daily_file_path("2026-11-04")))
+
+    def test_nse_collector_keeps_today_file_until_next_date(self):
+        from trading_harness.market_data.nse_live_collector import NSELiveCollector, IST
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            collector = NSELiveCollector(
+                live_dir=os.path.join(temp_dir, "live"),
+                archive_dir=os.path.join(temp_dir, "archive"),
+            )
+            today = datetime(2026, 11, 5, 15, 45, tzinfo=IST)
+            daily_path = collector.daily_file_path("2026-11-05")
+            with open(daily_path, "w", encoding="utf-8") as file:
+                file.write("snapshot_ist,symbol\n2026-11-05 15:30:00,NIFTY 50\n")
+
+            archived = collector.archive_expired_files(now=today)
+
+            self.assertEqual(archived, [])
+            self.assertTrue(os.path.exists(daily_path))
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,19 +1,18 @@
 """
 Real-time Intraday Scanner & Time Series Engine for Streamlit.
-Analyzes 3-minute snapshot sequences of NIFTY 50 and constituent stocks,
-computes technical indicators, and probes for valid setups across all 7 Flattrade strategies.
+Analyzes NIFTY 50 and constituent-stock snapshots, computes technical indicators,
+and probes for valid setups across the enabled intraday strategies.
 """
 
 import os
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
 from .indicators import TechnicalIndicators
 from .risk_engine import RiskEngine
 from .config import RiskConfig, StatutoryFeeStructure
 from .clock import IndianMarketClock
+from .strategies.supply_demand import SupplyDemandStrategy
 
 class LiveScannerEngine:
     def __init__(self, capital: float = 100000.0, risk_pct: float = 0.015):
@@ -25,7 +24,6 @@ class LiveScannerEngine:
             StatutoryFeeStructure(),
             self.clock
         )
-
     def load_running_data(self, file_path: str = "data/live/nifty50_running.csv") -> pd.DataFrame:
         if not os.path.exists(file_path):
             return pd.DataFrame()
@@ -37,90 +35,22 @@ class LiveScannerEngine:
 
     def get_symbol_time_series(self, df: pd.DataFrame, symbol: str) -> pd.DataFrame:
         """
-        Extracts or reconstructs the 3-minute intraday time series for a symbol.
-        If only 1 snapshot is available, synthesizes the realistic session path
-        from the official session open, day_high, day_low, and last_price.
+        Extracts observed NSE snapshots for the symbol.
+        Synthetic chart bars are built separately and are never scanner input.
         """
         sym_df = df[df["symbol"] == symbol].copy()
-        if sym_df.empty:
+        if len(sym_df) < 3:
             return pd.DataFrame()
 
-        # If we have 3 or more real 3-minute snapshots in the running file
-        if len(sym_df) >= 3:
-            sym_df["timestamp"] = sym_df["snapshot_ist"]
-            sym_df["close"] = sym_df["last_price"]
-            sym_df["high"] = sym_df["day_high"]
-            sym_df["low"] = sym_df["day_low"]
-            sym_df = sym_df.sort_values("snapshot_ist").reset_index(drop=True)
-            return self._enrich_indicators(sym_df)
-
-        # Otherwise, synthesize the realistic 3-minute curve using the recorded session parameters
-        row = sym_df.iloc[-1]
-        return self._synthesize_intraday_series(row)
-
-    def _synthesize_intraday_series(self, row: pd.Series) -> pd.DataFrame:
-        """
-        Synthesizes a realistic 3-minute intraday path from 09:15 to current time
-        bounded strictly by session Open, Day High, Day Low, and Last Traded Price.
-        """
-        o = float(row["open"])
-        h = float(row["day_high"])
-        l = float(row["day_low"])
-        c = float(row["last_price"])
-        prev_c = float(row["prev_close"])
-        total_vol = int(row["volume"])
-
-        # Create 3-minute intervals from 09:15 to 15:30 (approx 50-70 bars)
-        start_time = datetime.strptime("09:15", "%H:%M")
-        num_bars = 45 # 45 bars * 3 mins = 2 hours 15 mins representative intraday sample
-        
-        # Build path: open -> dip to low or surge to high -> progress towards close
-        t_steps = np.linspace(0, 1, num_bars)
-        
-        # Spline-like trajectory honoring OHLC bounds
-        trend = np.sin(t_steps * np.pi) 
-        if c >= o:
-            # Bullish day: early low, mid-day expansion, strong close
-            price_curve = o + (c - o) * t_steps + (h - max(o, c)) * trend * 0.8 - (min(o, c) - l) * (1 - trend) * 0.4
-        else:
-            # Bearish day: early high, downward drift to low, weak close
-            price_curve = o + (c - o) * t_steps + (h - o) * (1 - trend) * 0.4 - (o - l) * trend * 0.8
-
-        # Ensure bounds strictly respected
-        price_curve = np.clip(price_curve, l, h)
-        price_curve[0] = o
-        price_curve[-1] = c
-
-        records = []
-        vol_per_bar = max(1000, total_vol // num_bars)
-
-        for i, p in enumerate(price_curve):
-            bar_time = (start_time + timedelta(minutes=i * 3)).strftime("%H:%M")
-            noise = (h - l) * 0.08 * (np.random.rand() - 0.5) if (h - l) > 0 else 0.5
-            bar_c = round(float(p + noise), 2)
-            bar_c = min(h, max(l, bar_c))
-            
-            bar_o = round(float(price_curve[i - 1]) if i > 0 else o, 2)
-            bar_h = round(max(bar_o, bar_c) + abs(noise) * 0.5, 2)
-            bar_l = round(min(bar_o, bar_c) - abs(noise) * 0.5, 2)
-            bar_h = min(h, bar_h)
-            bar_l = max(l, bar_l)
-            
-            vol_mult = 2.5 if i < 6 else (1.8 if i > (num_bars - 8) else 0.8)
-            bar_vol = int(vol_per_bar * vol_mult * (0.8 + 0.4 * np.random.rand()))
-
-            records.append({
-                "timestamp": bar_time,
-                "open": bar_o,
-                "high": bar_h,
-                "low": bar_l,
-                "close": bar_c,
-                "volume": bar_vol,
-                "prev_close": prev_c
-            })
-
-        df_series = pd.DataFrame(records)
-        return self._enrich_indicators(df_series)
+        sym_df["timestamp"] = sym_df["snapshot_ist"]
+        sym_df["close"] = sym_df["last_price"]
+        sym_df["high"] = sym_df["day_high"]
+        sym_df["low"] = sym_df["day_low"]
+        sym_df = sym_df.sort_values("snapshot_ist").reset_index(drop=True)
+        enriched = self._enrich_indicators(sym_df)
+        enriched.attrs["data_source"] = "nse_daily_snapshots"
+        enriched.attrs["timeframe"] = None
+        return enriched
 
     def _enrich_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -152,9 +82,14 @@ class LiveScannerEngine:
 
         return df
 
-    def scan_symbol_setups(self, df_series: pd.DataFrame, symbol: str, active_strategies: List[str] = None) -> List[Dict[str, Any]]:
+    def scan_symbol_setups(
+        self,
+        df_series: pd.DataFrame,
+        symbol: str,
+        active_strategies: List[str] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Probes the time series for all 7 Flattrade strategies and returns triggered setups.
+        Probes the time series for enabled strategies and returns triggered setups.
         """
         if df_series.empty or len(df_series) < 15:
             return []
@@ -162,7 +97,8 @@ class LiveScannerEngine:
         if active_strategies is None:
             active_strategies = [
                 "Momentum Trading", "Breakout Trading", "Reversal Trading",
-                "VWAP Trading", "Scalping", "Gap and Go", "Opening Range Breakout"
+                "VWAP Trading", "Scalping", "Gap and Go", "Opening Range Breakout",
+                "Supply & Demand (5m)",
             ]
 
         setups = []
@@ -435,6 +371,33 @@ class LiveScannerEngine:
                             confidence="HIGH",
                             rationale=f"15m ORB Breakdown: Sliced below ORL ({orl:.2f}) with Range Size {or_size:.2f}. Target {target:.2f}"
                         ))
+
+        # -------------------------------------------------------------
+        # 8. Supply and Demand (verified or explicitly permitted estimated 5m OHLCV)
+        # -------------------------------------------------------------
+        if "Supply & Demand (5m)" in active_strategies:
+            signal = SupplyDemandStrategy().evaluate(df_series)
+            if signal:
+                size = self.risk_engine.calculate_position_size(
+                    self.capital,
+                    signal["entry"],
+                    signal["stop_loss"],
+                    self.risk_pct,
+                )
+                if size > 0:
+                    setup = self._create_setup_dict(
+                        strategy=signal["strategy"],
+                        symbol=symbol,
+                        side=signal["side"],
+                        entry=signal["entry"],
+                        stop_loss=signal["stop_loss"],
+                        target=signal["target"],
+                        quantity=size,
+                        confidence=signal["confidence"],
+                        rationale=signal["rationale"],
+                    )
+                    setup["data_quality"] = signal["data_quality"]
+                    setups.append(setup)
 
         return setups
 

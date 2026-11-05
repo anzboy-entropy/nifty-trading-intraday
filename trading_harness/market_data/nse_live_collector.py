@@ -57,7 +57,8 @@ class NSELiveCollector:
     ):
         self.live_dir = live_dir
         self.archive_dir = archive_dir
-        self.running_file_path = os.path.join(live_dir, running_filename)
+        self.running_file_prefix = running_filename.replace("_running.csv", "")
+        self.legacy_running_file_path = os.path.join(live_dir, running_filename)
         self.latest_json_path = os.path.join(live_dir, latest_json_filename)
         
         self.session: Optional[Any] = None
@@ -65,6 +66,18 @@ class NSELiveCollector:
         self.last_archived_date: Optional[str] = None
         
         self._ensure_directories()
+        self._migrate_legacy_running_file()
+        self.check_and_perform_eod_archive()
+
+    @property
+    def running_file_path(self) -> str:
+        return self.daily_file_path(self.get_ist_now().date().isoformat())
+
+    def daily_file_path(self, date_str: str) -> str:
+        return os.path.join(
+            self.live_dir,
+            f"{self.running_file_prefix}_{date_str}.csv",
+        )
 
     def _ensure_directories(self):
         os.makedirs(self.live_dir, exist_ok=True)
@@ -179,12 +192,23 @@ class NSELiveCollector:
 
     def append_to_running_file(self, records: List[Dict[str, Any]]):
         """
-        Appends a 3-minute snapshot to the live running CSV file,
+        Appends a snapshot to its date-specific live CSV file,
         and saves the latest snapshot to JSON for instant query access.
         """
-        file_exists = os.path.exists(self.running_file_path) and os.path.getsize(self.running_file_path) > 0
+        if not records:
+            return
+        snapshot_dates = {str(record["snapshot_ist"])[:10] for record in records}
+        if len(snapshot_dates) != 1:
+            raise ValueError("A snapshot batch must contain exactly one trading date")
+        date_tag = snapshot_dates.pop()
+        try:
+            datetime.strptime(date_tag, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError(f"Invalid snapshot date: {date_tag}") from exc
+        daily_path = self.daily_file_path(date_tag)
+        file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
 
-        with open(self.running_file_path, "a", newline="", encoding="utf-8") as f:
+        with open(daily_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
             if not file_exists:
                 writer.writeheader()
@@ -207,38 +231,109 @@ class NSELiveCollector:
 
     def archive_running_file(self, target_date_str: Optional[str] = None) -> Optional[str]:
         """
-        Moves the running file to the archive directory with the date tag.
-        Destination: data/archive/nifty50_YYYY-MM-DD.csv
+        Moves one date-specific snapshot file to the archive directory.
         """
-        if not os.path.exists(self.running_file_path) or os.path.getsize(self.running_file_path) == 0:
+        date_tag = target_date_str or self.get_ist_now().strftime("%Y-%m-%d")
+        running_path = self.daily_file_path(date_tag)
+        if not os.path.exists(running_path) or os.path.getsize(running_path) == 0:
             return None
 
-        date_tag = target_date_str or self.get_ist_now().strftime("%Y-%m-%d")
-        archived_filename = f"nifty50_{date_tag}.csv"
-        archived_path = os.path.join(self.archive_dir, archived_filename)
-
-        # If file already exists in archive, append or overwrite
+        archived_path = os.path.join(self.archive_dir, f"nifty50_{date_tag}.csv")
         if os.path.exists(archived_path):
-            backup_tag = self.get_ist_now().strftime("%Y%m%d_%H%M%S")
-            archived_path = os.path.join(self.archive_dir, f"nifty50_{date_tag}_{backup_tag}.csv")
-
-        shutil.move(self.running_file_path, archived_path)
+            self._merge_snapshot_files(archived_path, running_path)
+            os.remove(running_path)
+        else:
+            shutil.move(running_path, archived_path)
         self.last_archived_date = date_tag
         print(f"[NSELiveCollector] [ARCHIVE] Moved running file to: {archived_path}")
         return archived_path
 
+    @staticmethod
+    def _merge_snapshot_files(archive_path: str, daily_path: str) -> None:
+        with open(archive_path, "r", newline="", encoding="utf-8") as archived_file:
+            existing = list(csv.DictReader(archived_file))
+        existing_keys = {
+            (row.get("snapshot_ist", ""), row.get("symbol", ""))
+            for row in existing
+        }
+        with open(daily_path, "r", newline="", encoding="utf-8") as daily_file:
+            additions = []
+            for row in csv.DictReader(daily_file):
+                key = (row.get("snapshot_ist", ""), row.get("symbol", ""))
+                if key not in existing_keys:
+                    additions.append(row)
+                    existing_keys.add(key)
+        if additions:
+            with open(archive_path, "a", newline="", encoding="utf-8") as archived_file:
+                writer = csv.DictWriter(archived_file, fieldnames=CSV_HEADERS)
+                writer.writerows(additions)
+
+    def _migrate_legacy_running_file(self) -> None:
+        if not os.path.exists(self.legacy_running_file_path):
+            return
+        if os.path.getsize(self.legacy_running_file_path) == 0:
+            os.remove(self.legacy_running_file_path)
+            return
+        grouped_records: Dict[str, List[Dict[str, Any]]] = {}
+        with open(self.legacy_running_file_path, "r", newline="", encoding="utf-8") as legacy_file:
+            for record in csv.DictReader(legacy_file):
+                snapshot_date = str(record.get("snapshot_ist", ""))[:10]
+                try:
+                    datetime.strptime(snapshot_date, "%Y-%m-%d")
+                except ValueError:
+                    raise ValueError(
+                        f"Cannot migrate snapshot with invalid timestamp: {record.get('snapshot_ist')}"
+                    )
+                grouped_records.setdefault(snapshot_date, []).append(record)
+
+        if not grouped_records:
+            os.remove(self.legacy_running_file_path)
+            return
+        for date_tag, records in grouped_records.items():
+            daily_path = self.daily_file_path(date_tag)
+            if os.path.exists(daily_path):
+                temp_path = self._write_temp_snapshot(records)
+                try:
+                    self._merge_snapshot_files(daily_path, temp_path)
+                finally:
+                    os.remove(temp_path)
+            else:
+                with open(daily_path, "w", newline="", encoding="utf-8") as daily_file:
+                    writer = csv.DictWriter(daily_file, fieldnames=CSV_HEADERS)
+                    writer.writeheader()
+                    writer.writerows(records)
+        os.remove(self.legacy_running_file_path)
+
+    def _write_temp_snapshot(self, records: List[Dict[str, Any]]) -> str:
+        temp_path = os.path.join(self.live_dir, f".{self.running_file_prefix}_migration.csv")
+        with open(temp_path, "w", newline="", encoding="utf-8") as temp_file:
+            writer = csv.DictWriter(temp_file, fieldnames=CSV_HEADERS)
+            writer.writeheader()
+            writer.writerows(records)
+        return temp_path
+
+    def archive_expired_files(self, now: Optional[datetime] = None) -> List[str]:
+        now = now or self.get_ist_now()
+        archived = []
+        for filename in os.listdir(self.live_dir):
+            if not filename.startswith(f"{self.running_file_prefix}_") or not filename.endswith(".csv"):
+                continue
+            date_tag = filename[len(self.running_file_prefix) + 1:-4]
+            try:
+                file_date = datetime.strptime(date_tag, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if file_date < now.date():
+                result = self.archive_running_file(date_tag)
+                if result:
+                    archived.append(result)
+        return archived
+
     def check_and_perform_eod_archive(self):
         """
-        Checks if the trading day has ended (>= 15:30 IST) and archives the file.
+        Archives completed trading-day files, including days missed while offline.
         """
-        now = self.get_ist_now()
-        today_str = now.strftime("%Y-%m-%d")
-        market_close_time = datetime.strptime("15:30", "%H:%M").time()
-
-        if now.time() >= market_close_time and self.last_archived_date != today_str:
-            if os.path.exists(self.running_file_path) and os.path.getsize(self.running_file_path) > 0:
-                print(f"[NSELiveCollector] Market closed for {today_str}. Initiating EOD file archiving...")
-                self.archive_running_file(today_str)
+        return self.archive_expired_files()
 
     def run_single_cycle(self, force: bool = False) -> Dict[str, Any]:
         """

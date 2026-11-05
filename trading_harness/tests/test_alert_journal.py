@@ -2,6 +2,7 @@ import csv
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone, timedelta
 
 from trading_harness.alert_journal import TradeAlertJournal
 
@@ -64,6 +65,37 @@ class TestTradeAlertJournal(unittest.TestCase):
         with open(self.path, "r", newline="", encoding="utf-8") as file:
             records = list(csv.DictReader(file))
         self.assertEqual(len(records), 3)
+
+    def test_date_partitioned_journal_archives_completed_day(self):
+        archive_dir = os.path.join(self.temp_dir.name, "archive")
+        journal = TradeAlertJournal(
+            os.path.join(self.temp_dir.name, "trade_alerts.csv"),
+            archive_dir=archive_dir,
+            date_partitioned=True,
+        )
+        now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        file_date = now.date() + timedelta(days=1)
+        setup = dict(self.setup, timestamp=f"{file_date.isoformat()} 10:15:00")
+
+        self.assertTrue(journal.log_alert(setup))
+        daily_path = journal._path_for_date(file_date.isoformat())
+        self.assertIn(file_date.isoformat(), os.path.basename(daily_path))
+        self.assertTrue(os.path.exists(daily_path))
+
+        after_close = now.replace(
+            year=file_date.year,
+            month=file_date.month,
+            day=file_date.day,
+            hour=16,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        archived = journal.archive_expired_files(now=after_close, include_current=True)
+
+        self.assertEqual(archived, [os.path.join(archive_dir, os.path.basename(daily_path))])
+        self.assertFalse(os.path.exists(daily_path))
+        self.assertTrue(os.path.exists(archived[0]))
 
 
 if __name__ == "__main__":

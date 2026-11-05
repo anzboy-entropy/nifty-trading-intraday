@@ -69,7 +69,7 @@ Indian markets operate on a distinct three-phase rhythm in Indian Standard Time 
 
 ---
 
-## 🎯 The 7 Strategy Skills (`SKILL.md`)
+## 🎯 Intraday Strategy Skills (`SKILL.md`)
 
 Each strategy defined in the Flattrade framework is implemented as an agent skill:
 
@@ -108,7 +108,12 @@ Each strategy defined in the Flattrade framework is implemented as an agent skil
 - **Filter**: Volatility filter skips trade if Opening Range $> 0.70\times$ Daily ATR.
 - **Target & SL**: SL at range midpoint. Target is $1.5\times$ to $2.0\times$ the range size.
 
-### 8. [`skills/indian-market-trading-master/SKILL.md`](skills/indian-market-trading-master/SKILL.md)
+### 8. [`skills/pivot-vwap-ema/SKILL.md`](skills/pivot-vwap-ema/SKILL.md)
+- **Concept**: Directional confluence using Classic Daily Pivot Points, 5-minute VWAP, and the 20 EMA.
+- **Confirmation**: Completed bullish/bearish candle closes beyond all three levels with above-average volume; skip extended candles and setups without a 2:1 pivot target.
+- **Status**: Skill documentation only; this strategy is not included in the live scanner.
+
+### 9. [`skills/indian-market-trading-master/SKILL.md`](skills/indian-market-trading-master/SKILL.md)
 - Master orchestration skill governing daily lifecycle, strategy decision tree, and risk limits.
 
 ---
@@ -140,7 +145,7 @@ The harness exposes clean JSON-schema tools in `ClaudeAgentInterface` for agenti
 
 - `get_market_clock_state`: Returns IST time, session phase, and auto-squareoff alerts.
 - `get_market_state(symbol)`: Returns LTP, VWAP, 5m RSI, Day High/Low, and Level 2 depth.
-- `scan_market_opportunities(strategy_filter)`: Runs all 7 strategies and returns active trade setups.
+- `scan_market_opportunities(strategy_filter)`: Runs the harness strategies and returns active trade setups.
 - `calculate_risk_and_size(symbol, entry_price, stop_loss, risk_pct)`: Returns compliant position size.
 - `place_intraday_order(symbol, side, quantity, price, stop_loss, target, strategy, rationale)`: Submits MIS order.
 - `get_open_positions()`: Inspects live positions and unrealized PnL.
@@ -274,16 +279,16 @@ broker.authenticate(totp_code="123456")
 
 ## 📡 Live NSE 3-Minute Data Collector & Archiver
 
-The harness includes a built-in automated scraper ([`trading_harness/market_data/nse_live_collector.py`](file:///c:/work/trading_harness/market_data/nse_live_collector.py)) that connects to the official NSE website, grabs live data for the **NIFTY 50 Index and all 50 constituent stocks**, appends snapshots to a running intraday file, and moves it to an archive folder at market close. The Streamlit dashboard automatically polls every 5 minutes during market hours; the standalone collector CLI retains its configurable 3-minute default.
+The harness includes a built-in automated scraper ([`trading_harness/market_data/nse_live_collector.py`](file:///c:/work/trading_harness/market_data/nse_live_collector.py)) that connects to the official NSE website, grabs live data for the **NIFTY 50 Index and all 50 constituent stocks**, appends snapshots to a date-stamped intraday file, and moves completed dates to an archive folder. The Streamlit dashboard automatically polls every 5 minutes during market hours; the standalone collector CLI retains its configurable 3-minute default.
 
 ### 1. File Lifecycle & Storage
-- **Live Running File**: [`data/live/nifty50_running.csv`](file:///c:/work/data/live/nifty50_running.csv)
-  - While the dashboard is running during market hours, a new snapshot of all 51 items (1 index + 50 stocks) is appended every 5 minutes with `snapshot_ist` timestamps. The standalone collector CLI can also be run independently.
+- **Daily Live Snapshot File**: `data/live/nifty50_YYYY-MM-DD.csv`
+  - While the dashboard is running during market hours, snapshots of all 51 items (1 index + 50 stocks) are appended on fixed 5-minute clock marks (`:00`, `:05`, `:10`, etc.) with `snapshot_ist` timestamps.
 - **Latest Query Cache**: [`data/live/nifty50_latest.json`](file:///c:/work/data/live/nifty50_latest.json)
   - High-speed JSON cache updated continuously for sub-millisecond retrieval by Claude or trading strategies.
 - **End-of-Day (EOD) Archive**: `data/archive/nifty50_YYYY-MM-DD.csv`
-  - At **15:30 IST (market close)**, the running file is automatically moved into `data/archive/`.
-  - A clean running file is initialized the next morning.
+  - The current date's file remains available after the market closes and is archived when a later date starts. If the app was offline, it archives completed-day files on the next startup. `Archive EOD` can archive the current date manually.
+  - Each new trading date writes to a new date-stamped file; snapshots are not carried into the next day's file.
 
 ### 2. Running the Collector CLI
 ```bash
@@ -293,7 +298,7 @@ python run_nse_collector.py
 # Fetch a single 3-minute snapshot right now (force mode for off-market testing)
 python run_nse_collector.py --once --force
 
-# Inspect current live running file status
+# Inspect today's live snapshot file status
 python run_nse_collector.py --status
 
 # Manually trigger End-Of-Day archive
@@ -329,14 +334,17 @@ Open **`http://localhost:8501`** in your browser.
   - Quick-pick buttons: `Select All 50 + Index`, `Top 10 Heavyweights`, `NIFTY 50 Index Only`, `Clear All`.
   - Multi-select dropdown to pick exactly which stocks you want to monitor.
 - **Automated Trade Setup Detection**:
-  - Probes every selected stock against all 7 Flattrade strategies.
+  - Probes every selected stock against the eight scanner strategies.
+    - Supply & Demand uses 1–5 candle bases, volatility/volume-qualified departures, confirmed swing breaks, zone retests, confirmation candles, and a 2:1 minimum reward-to-risk target.
+    - It analyzes complete 5-minute bars and valid 15-minute context. The public NSE snapshot feed does not provide candle OHLCV; the dashboard estimates bars from consecutive sampled prices and cumulative-volume changes and permits explicitly labeled **ESTIMATED** signals. These are experimental: intra-interval prices, highs/lows, and true wicks are unknown, and confidence is capped at MEDIUM. Verified OHLCV remains preferred.
   - Shows compact, timestamped trade alerts with rationale tooltips and retains each alert's original values for the day.
-  - Logs each unique daily symbol/strategy/side/entry/target setup to `logs/trade_alerts.csv`, including stop, size, confidence, and rationale.
+  - Logs each unique daily symbol/strategy/side/entry/target setup to `logs/trade_alerts_YYYY-MM-DD.csv`, including stop, size, confidence, and rationale; completed dates move to `logs/archive/` on the next date.
   - Displays Entry, Hard Stop-Loss, Target, Risk:Reward ratio, and Position Sizing (shares) based on user's capital & 1-2% risk cap.
 - **Interactive Technical Charting (Plotly)**:
-  - Snapshot-based price chart overlaid with VWAP, 9 EMA, and auto-plotted Entry (blue), Stop-Loss (red), and Target (green) horizontal markers.
-  - Subplots for Volume/RVOL and 14-period RSI with 70/60/40/30 thresholds.
+  - An exploratory 5-minute estimate uses the prior and current sampled LTP for open/close, endpoint-only high/low, and changes in cumulative session volume. Missing intervals are omitted.
+  - The chart, VWAP, and indicators are estimates only: they cannot recover intrainterval trades or true wicks and are not inputs to scanner signals. Supply & Demand remains restricted to verified candles.
+  - Subplots include estimated Volume/RVOL and 14-period RSI with 70/60/40/30 thresholds.
 - **Live NSE Controls**:
-  - Automatic 5-minute NSE polling while the dashboard is running during market hours, plus a `Poll NSE` button for an immediate snapshot.
-  - `Archive EOD` button to move the running file to `data/archive/`.
+  - Automatic NSE polling aligned to fixed 5-minute clock marks during market hours, plus a `Poll NSE` button for an immediate snapshot without shifting the schedule.
+  - `Archive EOD` button to move the current day's snapshot and trade-call files to their archive folders.
   - Auto-refresh toggle (10s, 30s, 60s, 180s).

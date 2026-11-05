@@ -3,7 +3,7 @@ CLI Entrypoint for NSE Live NIFTY 50 Collector.
 Usage:
   python run_nse_collector.py                     # Runs continuous 3-minute loop
   python run_nse_collector.py --once --force       # Fetches 1 snapshot now (even off-market)
-  python run_nse_collector.py --archive-now        # Archives running file to data/archive/
+  python run_nse_collector.py --archive-now        # Archives today's snapshot file to data/archive/
   python run_nse_collector.py --status             # Displays running file status
 """
 
@@ -14,12 +14,12 @@ import json
 from trading_harness.market_data.nse_live_collector import NSELiveCollector
 
 def main():
-    parser = argparse.ArgumentParser(description="NSE Live 3-minute NIFTY 50 Collector & Archiver")
+    parser = argparse.ArgumentParser(description="NSE Live NIFTY 50 Collector & Daily Archiver")
     parser.add_argument("--interval", type=int, default=180, help="Interval in seconds (default: 180 = 3 mins)")
     parser.add_argument("--once", action="store_true", help="Fetch a single 3-minute snapshot and exit")
     parser.add_argument("--force", action="store_true", help="Force fetch even outside active market hours")
-    parser.add_argument("--archive-now", action="store_true", help="Archive current running file to data/archive/")
-    parser.add_argument("--status", action="store_true", help="Show current live running file status")
+    parser.add_argument("--archive-now", action="store_true", help="Archive today's snapshot file to data/archive/")
+    parser.add_argument("--status", action="store_true", help="Show today's live snapshot file status")
     
     args = parser.parse_args()
     collector = NSELiveCollector()
@@ -31,7 +31,7 @@ def main():
         print("=== NSE LIVE COLLECTOR STATUS ===")
         print(f"Current IST Time: {collector.get_ist_now().strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Market Active:    {collector.is_market_hours()}")
-        print(f"Running File:     {running_path} (Exists: {os.path.exists(running_path)})")
+        print(f"Today's File:     {running_path} (Exists: {os.path.exists(running_path)})")
         
         if os.path.exists(running_path):
             size_kb = os.path.getsize(running_path) / 1024.0
@@ -53,7 +53,7 @@ def main():
     if args.archive_now:
         archived = collector.archive_running_file()
         if archived:
-            print(f"[SUCCESS] Archived running file to: {archived}")
+            print(f"[SUCCESS] Archived daily snapshot file to: {archived}")
         else:
             print("[INFO] No running file found or file is empty.")
         return

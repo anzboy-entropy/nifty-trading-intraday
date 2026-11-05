@@ -1,7 +1,7 @@
 """
 Streamlit Application: NIFTY 50 Live Intraday Strategy Scanner & Trade Setup Detector.
 Continuously analyzes NSE snapshots for user-selected stocks and probes
-setups across all 7 Flattrade strategies.
+setups across enabled intraday strategies.
 """
 
 import os
@@ -21,9 +21,9 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from trading_harness.market_data.nse_live_collector import NSELiveCollector
 from trading_harness.market_data.nse_auto_poller import NSEAutoPoller
+from trading_harness.market_data.snapshot_candles import synthesize_5m_candles
 from trading_harness.scanner_engine import LiveScannerEngine
 from trading_harness.alert_journal import TradeAlertJournal
-from trading_harness.clock import IndianMarketClock
 
 # -----------------------------------------------------------------------------
 # Streamlit Page Configuration
@@ -35,72 +35,241 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom High-Quality Dark Styling
+# Trading-terminal styling
 st.markdown("""
 <style>
-    .main-title {
-        font-size: 2.1rem;
-        font-weight: 700;
-        margin-bottom: 0px;
-        color: #ffffff;
+    :root {
+        color-scheme: dark;
+        --app-bg: #080d17;
+        --panel-bg: #0f1725;
+        --panel-raised: #141f30;
+        --panel-border: #233149;
+        --text-primary: #e6edf7;
+        --text-muted: #8fa0b8;
+        --accent: #38bdf8;
+        --positive: #34d399;
+        --negative: #fb7185;
     }
-    .sub-title {
-        color: #94a3b8;
-        font-size: 0.95rem;
-        margin-bottom: 15px;
+    [data-testid="stAppViewContainer"] {
+        background:
+            radial-gradient(ellipse at 12% 0%, rgba(14, 116, 144, 0.10), transparent 34%),
+            var(--app-bg);
+        color: var(--text-primary);
     }
-    .metric-card {
-        background-color: #1e293b;
-        border-radius: 8px;
-        padding: 12px 16px;
-        border: 1px solid #334155;
+    [data-testid="stHeader"] {
+        background: rgba(8, 13, 23, 0.85);
     }
-    .nifty-index-card {
-        min-height: 78px;
-        padding: 8px 12px;
-        border-radius: 8px;
-        background: #1e293b;
-        border: 1px solid #334155;
+    [data-testid="stSidebar"] {
+        background: #0b1220;
+        border-right: 1px solid var(--panel-border);
     }
-    .nifty-index-label {
-        color: #94a3b8;
-        font-size: 11px;
-        line-height: 1.2;
-        margin-bottom: 5px;
+    [data-testid="stSidebar"] > div:first-child {
+        background: transparent;
     }
-    .nifty-index-value {
-        color: #f8fafc;
-        font-size: 21px;
-        font-weight: 600;
-        line-height: 1.2;
+    [data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+        padding-top: 0.45rem;
     }
-    .nifty-index-delta {
-        font-size: 11px;
-        line-height: 1.3;
-        margin-top: 3px;
+    [data-testid="stSidebar"] .block-container {
+        padding-top: 0.45rem;
+        padding-bottom: 0.75rem;
+    }
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+        gap: 0.5rem;
+    }
+    [data-testid="stSidebar"] h1 {
+        margin-top: 0;
+        margin-bottom: 0.35rem;
+    }
+    [data-testid="stSidebar"] h2 {
+        margin-top: 0.55rem;
+        margin-bottom: 0.3rem;
+    }
+    .block-container {
+        max-width: 1680px;
+        padding-top: 1.35rem;
+        padding-bottom: 2rem;
+    }
+    h1, h2, h3 {
+        color: var(--text-primary) !important;
+        letter-spacing: -0.025em;
+    }
+    h2 {
+        font-size: 1.18rem !important;
+        font-weight: 650 !important;
+    }
+    p, label, [data-testid="stCaptionContainer"] {
+        color: var(--text-muted);
+    }
+    hr {
+        border-color: var(--panel-border);
+        margin: 1.4rem 0;
+    }
+    [data-testid="stMetric"] {
+        background: linear-gradient(145deg, var(--panel-raised), var(--panel-bg));
+        border: 1px solid var(--panel-border);
+        border-radius: 10px;
+        padding: 13px 15px;
+        min-height: 82px;
     }
     [data-testid="stMetricLabel"] {
-        font-size: 11px !important;
+        font-size: 0.68rem !important;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: var(--text-muted) !important;
     }
     [data-testid="stMetricValue"] {
-        font-size: 19px !important;
+        font-size: 1.25rem !important;
+        font-weight: 650;
+        color: var(--text-primary) !important;
     }
     [data-testid="stMetricDelta"] {
-        font-size: 10px !important;
+        font-size: 0.72rem !important;
+    }
+    .stButton > button {
+        border: 1px solid #2b3c55;
+        border-radius: 7px;
+        background: #131e2e;
+        color: #dce7f5;
+        font-weight: 600;
+        transition: border-color 120ms ease, background 120ms ease;
+    }
+    .stButton > button:hover {
+        color: #ffffff;
+        border-color: #38bdf8;
+        background: #17283b;
+    }
+    [data-testid="stTextInput"] input,
+    [data-testid="stNumberInput"] input,
+    [data-testid="stSelectbox"] [data-baseweb="select"],
+    [data-testid="stMultiSelect"] [data-baseweb="select"] {
+        background: #101a29;
+        border-color: #2b3c55;
+    }
+    [data-testid="stDataFrame"] {
+        border: 1px solid var(--panel-border);
+        border-radius: 9px;
+        overflow: hidden;
+    }
+    [data-testid="stPlotlyChart"] {
+        border: 1px solid var(--panel-border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--panel-bg);
+    }
+    .terminal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 18px;
+        padding: 18px 20px;
+        margin: 0 0 16px;
+        border: 1px solid var(--panel-border);
+        border-radius: 12px;
+        background: linear-gradient(110deg, #121e2e, #0d1624 70%);
+        box-shadow: 0 8px 26px rgba(0, 0, 0, 0.16);
+    }
+    .terminal-brand {
+        color: #f1f6fc;
+        font-size: 1.45rem;
+        font-weight: 720;
+        letter-spacing: -0.035em;
+    }
+    .terminal-eyebrow {
+        margin-bottom: 5px;
+        color: #7f91aa;
+        font-size: 0.64rem;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+    }
+    .terminal-subtitle {
+        margin-top: 4px;
+        color: #91a1b7;
+        font-size: 0.78rem;
+    }
+    .terminal-status {
+        flex: 0 0 auto;
+        text-align: right;
+    }
+    .status-pill {
+        display: inline-block;
+        padding: 5px 9px;
+        border: 1px solid #245b4d;
+        border-radius: 999px;
+        background: rgba(16, 185, 129, 0.10);
+        color: #6ee7b7;
+        font-size: 0.68rem;
+        font-weight: 750;
+        letter-spacing: 0.06em;
+    }
+    .status-pill.closed {
+        border-color: #6b512b;
+        background: rgba(245, 158, 11, 0.10);
+        color: #fbbf24;
+    }
+    .terminal-clock {
+        margin-top: 7px;
+        color: #a7b5c8;
+        font-size: 0.73rem;
+        font-variant-numeric: tabular-nums;
+    }
+    .main-title {
+        font-size: 1.45rem;
+        font-weight: 720;
+        margin-bottom: 0;
+        color: #f1f6fc;
+    }
+    .sub-title {
+        color: #91a1b7;
+        font-size: 0.78rem;
+        margin: 4px 0 0;
+    }
+    .metric-card {
+        background: var(--panel-bg);
+        border-radius: 10px;
+        padding: 12px 16px;
+        border: 1px solid var(--panel-border);
+    }
+    .nifty-index-card {
+        min-height: 82px;
+        padding: 13px 15px;
+        border-radius: 10px;
+        background: linear-gradient(145deg, #142437, #0f1725);
+        border: 1px solid #25415a;
+    }
+    .nifty-index-label {
+        color: #8fa0b8;
+        font-size: 10px;
+        line-height: 1.2;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        margin-bottom: 7px;
+    }
+    .nifty-index-value {
+        color: #f1f6fc;
+        font-size: 22px;
+        font-weight: 650;
+        line-height: 1.2;
+        font-variant-numeric: tabular-nums;
+    }
+    .nifty-index-delta {
+        font-size: 10px;
+        line-height: 1.3;
+        margin-top: 3px;
+        font-weight: 650;
     }
     .setup-card-buy {
-        background: linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(30, 41, 59, 0.95) 100%);
+        background: linear-gradient(135deg, rgba(16, 185, 129, 0.10) 0%, #111b2a 100%);
         border: 1px solid #10b981;
-        border-left: 6px solid #10b981;
-        border-radius: 8px;
+        border-left: 4px solid #10b981;
+        border-radius: 9px;
         padding: 16px;
         margin-bottom: 14px;
     }
     .setup-card-sell {
-        background: linear-gradient(135deg, rgba(239, 68, 68, 0.12) 0%, rgba(30, 41, 59, 0.95) 100%);
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.10) 0%, #111b2a 100%);
         border: 1px solid #ef4444;
-        border-left: 6px solid #ef4444;
-        border-radius: 8px;
+        border-left: 4px solid #ef4444;
+        border-radius: 9px;
         padding: 16px;
         margin-bottom: 14px;
     }
@@ -132,9 +301,9 @@ st.markdown("""
     .trade-alert-pane {
         max-height: 460px;
         overflow-y: auto;
-        border: 1px solid #334155;
-        border-radius: 8px;
-        background: #0f172a;
+        border: 1px solid var(--panel-border);
+        border-radius: 9px;
+        background: #0c1421;
     }
     .trade-alert-row {
         display: grid;
@@ -142,7 +311,7 @@ st.markdown("""
         gap: 10px;
         align-items: center;
         padding: 9px 12px;
-        border-bottom: 1px solid #263449;
+        border-bottom: 1px solid #1d2b3e;
         color: #cbd5e1;
         font-size: 12px;
         line-height: 1.35;
@@ -152,8 +321,8 @@ st.markdown("""
         position: sticky;
         top: 0;
         z-index: 1;
-        background: #1e293b;
-        color: #94a3b8;
+        background: #172336;
+        color: #91a1b7;
         font-size: 10px;
         font-weight: 700;
         text-transform: uppercase;
@@ -175,6 +344,12 @@ st.markdown("""
         color: #94a3b8;
         white-space: normal;
     }
+    @media (max-width: 720px) {
+        .terminal-header { align-items: flex-start; padding: 14px; }
+        .terminal-brand { font-size: 1.15rem; }
+        .terminal-status { max-width: 115px; }
+        .terminal-clock { font-size: 0.65rem; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -186,12 +361,12 @@ def get_collector():
     return NSELiveCollector()
 
 @st.cache_resource
-def get_clock():
-    return IndianMarketClock()
-
-@st.cache_resource
 def get_auto_poller():
-    poller = NSEAutoPoller(get_collector(), interval_seconds=300)
+    poller = NSEAutoPoller(
+        get_collector(),
+        interval_seconds=300,
+        maintenance_callbacks=[get_trade_alert_journal().archive_expired_files],
+    )
     poller.start()
     return poller
 
@@ -200,7 +375,6 @@ def get_trade_alert_journal():
     return TradeAlertJournal()
 
 collector = get_collector()
-clock = get_clock()
 auto_poller = get_auto_poller()
 trade_alert_journal = get_trade_alert_journal()
 
@@ -217,7 +391,8 @@ ALL_STRATEGIES = [
     "VWAP Trading",
     "Scalping",
     "Gap and Go",
-    "Opening Range Breakout"
+    "Opening Range Breakout",
+    "Supply & Demand (5m)",
 ]
 
 # -----------------------------------------------------------------------------
@@ -225,38 +400,48 @@ ALL_STRATEGIES = [
 # -----------------------------------------------------------------------------
 st.sidebar.title("⚡ Control Panel")
 
-# 1. Market Status Indicator
 ist_now = collector.get_ist_now()
-session_phase = clock.get_session_phase()
 is_open = collector.is_market_hours(ist_now)
 
-phase_color = "#10b981" if is_open else "#f59e0b"
-st.sidebar.markdown(f"""
-<div style='background-color: #0f172a; padding: 10px; border-radius: 6px; border: 1px solid #334155; margin-bottom: 12px;'>
-    <div style='font-size: 0.8rem; color: #94a3b8;'>INDIAN STANDARD TIME (IST)</div>
-    <div style='font-size: 1.1rem; font-weight: 700; color: #f8fafc;'>{ist_now.strftime('%H:%M:%S')}</div>
-    <div style='font-size: 0.8rem; color: {phase_color}; font-weight: 600;'>● {session_phase.replace('_', ' ')} {'(OPEN)' if is_open else '(CLOSED)'}</div>
-</div>
-""", unsafe_allow_html=True)
+# 1. Risk & Account Parameters
+with st.sidebar.expander("🛡️ Risk Parameters", expanded=False):
+    capital = st.number_input(
+        "Account Capital (INR)",
+        min_value=10000.0,
+        max_value=50000000.0,
+        value=100000.0,
+        step=10000.0,
+    )
+    risk_pct_val = st.slider(
+        "Risk Per Trade (%)",
+        min_value=0.5,
+        max_value=2.0,
+        value=1.5,
+        step=0.1,
+    ) / 100.0
+    st.caption(
+        "Enforces Flattrade Rule 2: Max 1-2% risk per trade. "
+        "Square-off cut-off: 15:20 IST."
+    )
 
-# 2. Risk & Account Parameters
-st.sidebar.subheader("🛡️ Risk Parameters")
-capital = st.sidebar.number_input("Account Capital (INR)", min_value=10000.0, max_value=50000000.0, value=100000.0, step=10000.0)
-risk_pct_val = st.sidebar.slider("Risk Per Trade (%)", min_value=0.5, max_value=2.0, value=1.5, step=0.1) / 100.0
-
-st.sidebar.caption("Enforces Flattrade Rule 2: Max 1-2% risk per trade. Square-off cut-off: 15:20 IST.")
-
-# 3. Strategy Toggles
-st.sidebar.subheader("🎯 Active Strategies")
+# 2. Strategy Toggles
 selected_strategies = []
-for strat in ALL_STRATEGIES:
-    if st.sidebar.checkbox(strat, value=True):
-        selected_strategies.append(strat)
+with st.sidebar.expander("🎯 Active Strategies", expanded=False):
+    for strat in ALL_STRATEGIES:
+        if st.checkbox(strat, value=True):
+            selected_strategies.append(strat)
+st.sidebar.warning(
+    "Supply & Demand may generate ESTIMATED signals from sampled NSE prices. "
+    "Estimated bars use endpoint prices and cumulative-volume changes; true "
+    "intra-interval moves and wicks are unknown. Treat these signals as "
+    "experimental, not verified trade data."
+)
 
 # 4. Live Data Actions
 st.sidebar.subheader("📡 NSE Live Collector")
 poll_status = auto_poller.get_status()
 last_result = poll_status["last_result"]
+next_poll = poll_status["next_poll_at"]
 if poll_status["last_poll_at"]:
     st.sidebar.caption(
         f"Last poll: {poll_status['last_poll_at'].strftime('%H:%M:%S')} IST "
@@ -264,16 +449,10 @@ if poll_status["last_poll_at"]:
     )
     if last_result["status"] == "ERROR":
         st.sidebar.error(f"NSE poll failed: {last_result.get('error', 'Unknown error')}")
-    elif last_result["status"] == "SUCCESS":
-        next_poll = poll_status["next_poll_at"]
-        if next_poll is not None:
-            seconds_remaining = max(0, int(next_poll - time.monotonic()))
-            st.sidebar.caption(
-                f"Automatic polling every 5 minutes during market hours. "
-                f"Next poll in about {seconds_remaining // 60}m {seconds_remaining % 60}s."
-            )
 else:
-    st.sidebar.caption("Automatic polling every 5 minutes during market hours.")
+    st.sidebar.caption("Automatic polls align to 5-minute clock marks during market hours.")
+if next_poll is not None:
+    st.sidebar.caption(f"Next scheduled poll: {next_poll.strftime('%H:%M:%S')} IST.")
 
 col_b1, col_b2 = st.sidebar.columns(2)
 with col_b1:
@@ -289,10 +468,13 @@ with col_b1:
 with col_b2:
     if st.button("📦 Archive EOD", help="Archives the running file to data/archive/"):
         archived = auto_poller.archive_now()
+        archived_alerts = trade_alert_journal.archive_expired_files(include_current=True)
         if archived:
-            st.success("Archived to data/archive/")
+            st.success("Today's snapshot file archived to data/archive/")
         else:
-            st.info("No file to archive")
+            st.info("No snapshot file to archive")
+        if archived_alerts:
+            st.success("Today's trade-call file archived to logs/archive/")
         st.rerun()
 
 # 5. Auto-Refresh Controls
@@ -308,7 +490,15 @@ with st.sidebar.expander("Dashboard refresh", expanded=False):
 
 # Load running data
 scanner = LiveScannerEngine(capital=capital, risk_pct=risk_pct_val)
-df_running = scanner.load_running_data()
+daily_snapshot_path = collector.running_file_path
+if not os.path.exists(daily_snapshot_path):
+    archived_snapshot_path = os.path.join(
+        collector.archive_dir,
+        os.path.basename(daily_snapshot_path),
+    )
+    if os.path.exists(archived_snapshot_path):
+        daily_snapshot_path = archived_snapshot_path
+df_running = scanner.load_running_data(daily_snapshot_path)
 if not df_running.empty and "snapshot_ist" in df_running.columns:
     today_ist = ist_now.strftime("%Y-%m-%d")
     df_running = df_running[
@@ -316,10 +506,20 @@ if not df_running.empty and "snapshot_ist" in df_running.columns:
     ].copy()
 
 # -----------------------------------------------------------------------------
-# Main Dashboard Header: Index Ticker Banner
+# Main Dashboard Header: Trading Terminal
 # -----------------------------------------------------------------------------
-st.markdown("<div class='main-title'>📈 NIFTY 50 Intraday Strategy Scanner</div>", unsafe_allow_html=True)
-st.markdown("<div class='sub-title'>Probing NSE snapshot series against 7 institutional intraday strategies</div>", unsafe_allow_html=True)
+status_class = "" if is_open else "closed"
+market_status = "MARKET OPEN" if is_open else "MARKET CLOSED"
+st.markdown(
+    f"<div class='terminal-header'>"
+    f"<div><div class='terminal-eyebrow'>NSE • INTRADAY MARKET MONITOR</div>"
+    f"<div class='terminal-brand'>NIFTY 50 Trading Desk</div>"
+    f"<div class='terminal-subtitle'>Live watchlist, strategy signals, and snapshot-based technical analysis</div></div>"
+    f"<div class='terminal-status'><span class='status-pill {status_class}'>{market_status}</span>"
+    f"<div class='terminal-clock'>IST {ist_now.strftime('%d %b %Y · %H:%M:%S')}</div></div>"
+    f"</div>",
+    unsafe_allow_html=True,
+)
 
 if df_running.empty:
     st.warning("⚠️ No data in running file yet. The app polls NSE automatically every five minutes during market hours; you can also click **'Poll NSE'** to fetch immediately.")
@@ -416,7 +616,34 @@ for sym in selected_symbols:
     series = scanner.get_symbol_time_series(df_running, sym)
     if not series.empty:
         symbol_series_cache[sym] = series
-        setups = scanner.scan_symbol_setups(series, sym, active_strategies=selected_strategies)
+        snapshot_strategies = [
+            strategy for strategy in selected_strategies
+            if strategy != "Supply & Demand (5m)"
+        ]
+        setups = scanner.scan_symbol_setups(
+            series,
+            sym,
+            active_strategies=snapshot_strategies,
+        )
+        if "Supply & Demand (5m)" in selected_strategies:
+            estimated_candles = synthesize_5m_candles(df_running, sym)
+            if not estimated_candles.empty:
+                estimated_candles.attrs["allow_estimated_ohlcv"] = True
+                estimated_candles.attrs["tick_size"] = 0.05
+                estimated_candles = scanner._enrich_indicators(estimated_candles)
+                estimated_candles.attrs.update({
+                    "data_source": "synthetic_estimate",
+                    "timeframe": "5m",
+                    "timezone": "Asia/Kolkata",
+                    "verified_ohlcv": False,
+                    "allow_estimated_ohlcv": True,
+                    "tick_size": 0.05,
+                })
+                setups.extend(scanner.scan_symbol_setups(
+                    estimated_candles,
+                    sym,
+                    active_strategies=["Supply & Demand (5m)"],
+                ))
         symbol_snapshots = df_running.loc[
             df_running["symbol"] == sym, "snapshot_ist"
         ].dropna().astype(str)
@@ -477,7 +704,8 @@ def render_trade_alert_list(setups):
             f"<span>{html.escape(setup['timestamp'])}</span>"
             f"<span class='trade-alert-symbol'>{html.escape(setup['symbol'])}</span>"
             f"<span class='{side_class}'>{html.escape(setup['side'])}</span>"
-            f"<span title='{rationale}'>{html.escape(setup['strategy'])} ⓘ</span>"
+            f"<span title='{rationale}'>{html.escape(setup['strategy'])}"
+            f"{' ⚠ ESTIMATED' if setup.get('data_quality') == 'ESTIMATED' else ''} ⓘ</span>"
             f"<span>₹{setup['entry_price']:,.2f}</span>"
             f"<span>₹{setup['stop_loss']:,.2f}</span>"
             f"<span>₹{setup['target']:,.2f}</span>"
@@ -515,7 +743,10 @@ st.markdown(
 )
 render_trade_alert_list(earlier_snapshot_alerts)
 st.caption("Identical calls keep their original snapshot time and details; changed entry or target values are separate alerts. Hover over a strategy to read its rationale.")
-st.caption("Trade calls are recorded in `logs/trade_alerts.csv`, deduplicated by day, symbol, strategy, side, entry, and target.")
+st.caption(
+    f"Trade calls are recorded in `{trade_alert_journal.path}`, deduplicated by day, "
+    "symbol, strategy, side, entry, and target; completed daily files move to `logs/archive/`."
+)
 
 # -----------------------------------------------------------------------------
 # Interactive Technical Charting Studio (Plotly)
@@ -525,19 +756,23 @@ st.subheader("📊 Intraday Time Series & Setup Visualizer")
 
 if selected_symbols:
     chart_symbol = st.selectbox("Select Symbol to Inspect Chart & Indicators:", options=selected_symbols, index=0)
-    
-    if chart_symbol in symbol_series_cache:
-        df_chart = symbol_series_cache[chart_symbol]
-        
+
+    df_chart = synthesize_5m_candles(df_running, chart_symbol)
+    if not df_chart.empty:
+        df_chart = scanner._enrich_indicators(df_chart)
+
         fig = make_subplots(
             rows=3, cols=1,
             shared_xaxes=True,
             vertical_spacing=0.06,
             row_heights=[0.60, 0.20, 0.20],
-            subplot_titles=(f"{chart_symbol} Snapshot-Based Price Estimate with VWAP", "Volume & RVOL", "RSI (14)")
+            subplot_titles=(
+                f"{chart_symbol} Estimated 5-Minute Bars with VWAP",
+                "Volume & RVOL (snapshot deltas)",
+                "RSI (14) — estimated closes",
+            )
         )
 
-        # 1. Candlestick Trace
         fig.add_trace(
             go.Candlestick(
                 x=df_chart["timestamp"],
@@ -545,25 +780,23 @@ if selected_symbols:
                 high=df_chart["high"],
                 low=df_chart["low"],
                 close=df_chart["close"],
-                name="Snapshot estimate",
+                name="Estimated 5m bar",
                 increasing_line_color='#10b981',
                 decreasing_line_color='#ef4444'
             ),
             row=1, col=1
         )
 
-        # 2. VWAP Line
         fig.add_trace(
             go.Scatter(
                 x=df_chart["timestamp"],
                 y=df_chart["vwap"],
                 line=dict(color='#f59e0b', width=2),
-                name="VWAP (Fair Value)"
+                name="Estimated VWAP"
             ),
             row=1, col=1
         )
 
-        # 3. 9 EMA Line
         fig.add_trace(
             go.Scatter(
                 x=df_chart["timestamp"],
@@ -574,21 +807,6 @@ if selected_symbols:
             row=1, col=1
         )
 
-        # Check if symbol has an identified setup to overlay entry, SL, Target
-        matching_setup = next((s for s in all_identified_setups if s["symbol"] == chart_symbol), None)
-        if matching_setup:
-            entry_p = matching_setup["entry_price"]
-            sl_p = matching_setup["stop_loss"]
-            tgt_p = matching_setup["target"]
-
-            # Add Entry Line
-            fig.add_hline(y=entry_p, line_dash="solid", line_color="#3b82f6", annotation_text=f"Entry: ₹{entry_p}", row=1, col=1)
-            # Add Stop Loss Line
-            fig.add_hline(y=sl_p, line_dash="dash", line_color="#ef4444", annotation_text=f"SL: ₹{sl_p}", row=1, col=1)
-            # Add Target Line
-            fig.add_hline(y=tgt_p, line_dash="dash", line_color="#10b981", annotation_text=f"Target: ₹{tgt_p}", row=1, col=1)
-
-        # 4. Volume Bars
         colors = ['#10b981' if c >= o else '#ef4444' for c, o in zip(df_chart["close"], df_chart["open"])]
         fig.add_trace(
             go.Bar(
@@ -600,7 +818,6 @@ if selected_symbols:
             row=2, col=1
         )
 
-        # 5. RSI Trace & Threshold Bands
         fig.add_trace(
             go.Scatter(
                 x=df_chart["timestamp"],
@@ -623,6 +840,16 @@ if selected_symbols:
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
         )
         st.plotly_chart(fig, use_container_width=True)
+        st.caption(
+            "Exploratory estimates only—not verified OHLCV or trade signals. Each bar uses "
+            "the prior and current sampled LTP for open/close; high/low show only those "
+            "sampled endpoints, so intra-interval moves and true wicks are unknown. Volume "
+            "is the change in cumulative session volume. Missing intervals are omitted."
+        )
+    else:
+        st.info(
+            "No adjacent, clock-aligned snapshots are available yet to estimate a 5-minute bar."
+        )
 
 # -----------------------------------------------------------------------------
 # Selected Constituents Live Market Table
@@ -636,7 +863,13 @@ for sym in selected_symbols:
     if not sym_rows.empty:
         last = sym_rows.iloc[-1]
         has_setup = any(s["symbol"] == sym for s in all_identified_setups)
-        setup_name = next((s["strategy"] for s in all_identified_setups if s["symbol"] == sym), "-")
+        symbol_setup = next(
+            (s for s in all_identified_setups if s["symbol"] == sym),
+            None,
+        )
+        setup_name = symbol_setup["strategy"] if symbol_setup else "-"
+        if symbol_setup and symbol_setup.get("data_quality") == "ESTIMATED":
+            setup_name += " (ESTIMATED)"
         
         table_rows.append({
             "Symbol": sym,
