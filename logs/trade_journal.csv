@@ -1,0 +1,7 @@
+trade_id,timestamp,symbol,strategy,side,quantity,entry_price,exit_price,stop_loss,target,exit_reason,gross_pnl,statutory_charges,net_pnl,r_multiple,is_win,rationale
+EXIT_4A083FBE,2026-11-04 20:24:23,TATAMOTORS,intraday,BUY,166,985.0,1003.0,0.0,0.0,TARGET_HIT,2988.0,48.2,2939.8,2939.8,True,Automated simulated intraday execution
+EXIT_91AAD0DC,2026-11-04 20:24:31,TATAMOTORS,intraday,BUY,166,985.0,1003.0,0.0,0.0,TARGET_HIT,2988.0,48.2,2939.8,2939.8,True,Automated simulated intraday execution
+EXIT_4510AF03,2026-11-04 20:24:39,TATAMOTORS,intraday,BUY,166,985.0,1003.0,0.0,0.0,TARGET_HIT,2988.0,48.2,2939.8,2939.8,True,Automated simulated intraday execution
+EXIT_2AD4692D,2026-11-04 20:25:25,TATAMOTORS,intraday,BUY,166,985.0,1003.0,0.0,0.0,TARGET_HIT,2988.0,48.2,2939.8,2939.8,True,Automated simulated intraday execution
+EXIT_51EC1744,2026-11-04 20:25:25,NIFTY_FUT,intraday,BUY,22,22460.0,22530.0,0.0,0.0,TARGET_HIT,1540.0,143.52,1396.48,1396.48,True,Automated simulated intraday execution
+EXIT_925B9268,2026-11-04 20:25:25,INFY,intraday,BUY,250,1492.0,1498.0,0.0,0.0,15:20_MIS_AUTO_SQUAREOFF,1500.0,108.42,1391.58,1391.58,True,Automated simulated intraday execution
