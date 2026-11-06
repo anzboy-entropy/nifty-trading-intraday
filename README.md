@@ -328,6 +328,7 @@ An interactive web dashboard ([`app.py`](file:///c:/work/app.py)) that automatic
 python -m streamlit run app.py
 ```
 Open **`http://localhost:8501`** in your browser.
+Streamlit Community Cloud installs the app dependencies from the root [`requirements.txt`](requirements.txt), including Plotly for charts and `curl_cffi` for the NSE collector.
 
 ### 2. Key Dashboard Capabilities
 - **Constituent Watchlist Selector**:
