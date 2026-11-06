@@ -893,7 +893,7 @@ if table_rows:
             "Day High (₹)": "₹{:,.2f}",
             "Day Low (₹)": "₹{:,.2f}",
             "Volume": "{:,}"
-        }).applymap(
+        }).map(
             lambda v: "color: #10b981; font-weight: bold;" if "+" in str(v) else ("color: #ef4444; font-weight: bold;" if "-" in str(v) else ""),
             subset=["Change (%)", "Change (₹)"]
         ),
