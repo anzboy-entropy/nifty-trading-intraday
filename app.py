@@ -374,6 +374,35 @@ def get_auto_poller():
 def get_trade_alert_journal():
     return TradeAlertJournal()
 
+
+def read_trade_alert_history(journal, date_str):
+    """Read history with compatibility for journals lacking read_alerts()."""
+    read_alerts = getattr(journal, "read_alerts", None)
+    if callable(read_alerts):
+        return read_alerts(date_str)
+
+    active_path = journal.path
+    archive_dir = getattr(
+        journal,
+        "archive_dir",
+        os.path.join(os.path.dirname(active_path), "archive"),
+    )
+    candidate_paths = [
+        active_path,
+        os.path.join(archive_dir, os.path.basename(active_path)),
+    ]
+    for path in candidate_paths:
+        if not os.path.exists(path):
+            continue
+        history = pd.read_csv(path, dtype=str)
+        if "snapshot_ist" in history.columns:
+            history = history[
+                history["snapshot_ist"].astype(str).str[:10] == date_str
+            ]
+        return history.to_dict("records")
+    return []
+
+
 collector = get_collector()
 auto_poller = get_auto_poller()
 trade_alert_journal = get_trade_alert_journal()
@@ -697,7 +726,9 @@ for setup in current_snapshot_alerts:
         if rationale
     )
 
-history_episodes = group_alert_episodes(trade_alert_journal.read_alerts(alert_date))
+history_episodes = group_alert_episodes(
+    read_trade_alert_history(trade_alert_journal, alert_date)
+)
 active_snapshot_times = {
     (setup["symbol"], setup["side"]): pd.to_datetime(setup["timestamp"])
     for setup in current_snapshot_alerts
