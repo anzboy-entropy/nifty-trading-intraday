@@ -5,10 +5,71 @@ import os
 import shutil
 import threading
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def group_alert_episodes(
+    records: List[Dict[str, Any]],
+    gap_minutes: int = 15,
+) -> List[Dict[str, Any]]:
+    """Collapse snapshot-level rows into symbol/direction setup episodes."""
+    grouped: Dict[Tuple[str, str], List[Tuple[datetime, Dict[str, Any]]]] = {}
+    for record in records:
+        timestamp = TradeAlertJournal._parse_timestamp(
+            str(record.get("snapshot_ist", record.get("timestamp", "")))
+        )
+        if timestamp is None:
+            continue
+        key = (str(record.get("symbol", "")), str(record.get("side", "")))
+        grouped.setdefault(key, []).append((timestamp, record))
+
+    episodes = []
+    max_gap = timedelta(minutes=gap_minutes)
+    for (symbol, side), timestamped_records in grouped.items():
+        timestamped_records.sort(key=lambda item: item[0])
+        current = []
+        for item in timestamped_records:
+            if current and item[0] - current[-1][0] > max_gap:
+                episodes.append(_summarize_episode(symbol, side, current))
+                current = []
+            current.append(item)
+        if current:
+            episodes.append(_summarize_episode(symbol, side, current))
+
+    return sorted(episodes, key=lambda episode: episode["last_seen"], reverse=True)
+
+
+def _summarize_episode(
+    symbol: str,
+    side: str,
+    timestamped_records: List[Tuple[datetime, Dict[str, Any]]],
+) -> Dict[str, Any]:
+    latest = dict(timestamped_records[-1][1])
+    latest["symbol"] = symbol
+    latest["side"] = side
+    latest["start_timestamp"] = timestamped_records[0][0].strftime("%Y-%m-%d %H:%M:%S")
+    latest["last_seen"] = timestamped_records[-1][0].strftime("%Y-%m-%d %H:%M:%S")
+    latest["strategies"] = sorted({
+        str(record.get("strategy", ""))
+        for _, record in timestamped_records
+        if record.get("strategy")
+    })
+    strategy_rationales = {}
+    for _, record in timestamped_records:
+        strategy = str(record.get("strategy", ""))
+        rationale = str(record.get("rationale", "")).strip()
+        if strategy and rationale:
+            strategy_rationales[strategy] = rationale
+    latest["strategy_rationales"] = strategy_rationales
+    latest["rationale"] = " | ".join(
+        f"{strategy}: {rationale}"
+        for strategy, rationale in sorted(strategy_rationales.items())
+    )
+    latest["updates"] = len(timestamped_records)
+    return latest
 
 
 class TradeAlertJournal:
@@ -41,9 +102,9 @@ class TradeAlertJournal:
         self._stem = os.path.splitext(os.path.basename(self._legacy_path))[0]
         self.archive_dir = archive_dir or os.path.join(self._directory, "archive")
         self._lock = threading.Lock()
-        self._logged_keys: Set[Tuple[str, str, str, str, str, str]] = set()
+        self._episode_seen_at: Dict[Tuple[str, str, str, str], datetime] = {}
         self._migrate_legacy_file()
-        self._load_logged_keys()
+        self._load_episode_timestamps()
         if self._date_partitioned:
             self.archive_expired_files()
 
@@ -92,7 +153,7 @@ class TradeAlertJournal:
                         existing_keys.add(self._key(record))
         os.remove(self._legacy_path)
 
-    def _load_logged_keys(self) -> None:
+    def _load_episode_timestamps(self) -> None:
         if not os.path.isdir(self._directory):
             return
         prefixes = (f"{self._stem}_",)
@@ -106,7 +167,16 @@ class TradeAlertJournal:
                     paths.append(os.path.join(self.archive_dir, filename))
         for path in paths:
             with open(path, "r", newline="", encoding="utf-8") as file:
-                self._logged_keys.update(self._key(record) for record in csv.DictReader(file))
+                for record in csv.DictReader(file):
+                    episode_key = self._episode_key(record)
+                    timestamp = self._parse_timestamp(
+                        record.get("snapshot_ist", record.get("timestamp", ""))
+                    )
+                    if timestamp is not None and (
+                        episode_key not in self._episode_seen_at
+                        or timestamp > self._episode_seen_at[episode_key]
+                    ):
+                        self._episode_seen_at[episode_key] = timestamp
 
     @staticmethod
     def _key(record: Dict[str, Any]) -> Tuple[str, str, str, str, str, str]:
@@ -121,14 +191,40 @@ class TradeAlertJournal:
             f"{float(record.get('target', 0.0)):.2f}",
         )
 
-    def log_alert(self, setup: Dict[str, Any]) -> bool:
-        """Append each distinct setup to its snapshot-date journal."""
-        key = self._key(setup)
-        with self._lock:
-            if key in self._logged_keys:
-                return False
+    @staticmethod
+    def _episode_key(record: Dict[str, Any]) -> Tuple[str, str, str, str]:
+        timestamp = str(record.get("snapshot_ist", record.get("timestamp", "")))
+        return (
+            timestamp[:10],
+            str(record.get("symbol", "")),
+            str(record.get("strategy", "")),
+            str(record.get("side", "")),
+        )
 
-            date_str = key[0]
+    @staticmethod
+    def _parse_timestamp(value: str) -> Optional[datetime]:
+        try:
+            return datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            return None
+
+    def log_alert(self, setup: Dict[str, Any]) -> bool:
+        """Log an episode start, suppressing price-only repeats within 15 minutes."""
+        with self._lock:
+            episode_key = self._episode_key(setup)
+            date_str = episode_key[0]
+            snapshot_time = self._parse_timestamp(str(setup.get("timestamp", "")))
+            if snapshot_time is None:
+                raise ValueError(f"Invalid trade-alert timestamp: {setup.get('timestamp')}")
+            last_seen = self._episode_seen_at.get(episode_key)
+            if last_seen is not None:
+                elapsed = snapshot_time - last_seen
+                if elapsed <= timedelta(0):
+                    return False
+                if elapsed <= timedelta(minutes=15):
+                    self._episode_seen_at[episode_key] = snapshot_time
+                    return False
+
             try:
                 snapshot_date = datetime.strptime(date_str, "%Y-%m-%d").date()
             except ValueError as exc:
@@ -172,8 +268,23 @@ class TradeAlertJournal:
                     writer.writeheader()
                 writer.writerow(record)
 
-            self._logged_keys.add(key)
+            self._episode_seen_at[episode_key] = snapshot_time
             return True
+
+    def read_alerts(self, date_str: str) -> List[Dict[str, str]]:
+        """Read a date's live journal, falling back to its archived file."""
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError as exc:
+            raise ValueError(f"Invalid trade-alert date: {date_str}") from exc
+
+        path = self._path_for_date(date_str) if self._date_partitioned else self._legacy_path
+        if self._date_partitioned and not os.path.exists(path):
+            path = os.path.join(self.archive_dir, f"{self._stem}_{date_str}.csv")
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", newline="", encoding="utf-8") as file:
+            return list(csv.DictReader(file))
 
     def archive_expired_files(
         self,

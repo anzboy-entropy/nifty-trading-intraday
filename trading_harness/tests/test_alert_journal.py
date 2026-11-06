@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone, timedelta
 
-from trading_harness.alert_journal import TradeAlertJournal
+from trading_harness.alert_journal import TradeAlertJournal, group_alert_episodes
 
 
 class TestTradeAlertJournal(unittest.TestCase):
@@ -51,20 +51,68 @@ class TestTradeAlertJournal(unittest.TestCase):
         reopened_journal = TradeAlertJournal(self.path)
         self.assertFalse(reopened_journal.log_alert(self.setup))
 
-    def test_changed_entry_or_target_is_a_distinct_alert(self):
+    def test_price_updates_are_suppressed_until_a_new_episode(self):
         journal = TradeAlertJournal(self.path)
 
         self.assertTrue(journal.log_alert(self.setup))
-        changed_entry = dict(self.setup, entry_price=1001.0)
-        changed_target = dict(self.setup, target=1018.0)
+        changed_entry = dict(
+            self.setup,
+            timestamp="2026-11-05 10:20:00",
+            entry_price=1001.0,
+        )
+        new_episode = dict(
+            self.setup,
+            timestamp="2026-11-05 10:36:00",
+        )
 
-        self.assertTrue(journal.log_alert(changed_entry))
-        self.assertTrue(journal.log_alert(changed_target))
         self.assertFalse(journal.log_alert(changed_entry))
+        self.assertTrue(journal.log_alert(new_episode))
+        self.assertFalse(journal.log_alert(new_episode))
 
         with open(self.path, "r", newline="", encoding="utf-8") as file:
             records = list(csv.DictReader(file))
-        self.assertEqual(len(records), 3)
+        self.assertEqual(len(records), 2)
+
+    def test_groups_snapshot_rows_into_strategy_episodes(self):
+        records = [
+            dict(self.setup, timestamp="2026-11-05 10:15:00"),
+            dict(
+                self.setup,
+                timestamp="2026-11-05 10:20:00",
+                strategy="VWAP Trading",
+                entry_price=1001.0,
+            ),
+            dict(
+                self.setup,
+                timestamp="2026-11-05 10:25:00",
+                entry_price=1002.0,
+            ),
+            dict(
+                self.setup,
+                timestamp="2026-11-05 10:45:00",
+                entry_price=1005.0,
+            ),
+        ]
+
+        episodes = group_alert_episodes(records)
+
+        self.assertEqual(len(episodes), 2)
+        self.assertEqual(episodes[0]["start_timestamp"], "2026-11-05 10:45:00")
+        self.assertEqual(episodes[0]["updates"], 1)
+        self.assertEqual(episodes[1]["start_timestamp"], "2026-11-05 10:15:00")
+        self.assertEqual(episodes[1]["last_seen"], "2026-11-05 10:25:00")
+        self.assertEqual(episodes[1]["updates"], 3)
+        self.assertEqual(
+            episodes[1]["strategies"],
+            ["Momentum Trading", "VWAP Trading"],
+        )
+        self.assertEqual(
+            episodes[1]["strategy_rationales"],
+            {
+                "Momentum Trading": self.setup["rationale"],
+                "VWAP Trading": self.setup["rationale"],
+            },
+        )
 
     def test_date_partitioned_journal_archives_completed_day(self):
         archive_dir = os.path.join(self.temp_dir.name, "archive")

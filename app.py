@@ -23,7 +23,7 @@ from trading_harness.market_data.nse_live_collector import NSELiveCollector
 from trading_harness.market_data.nse_auto_poller import NSEAutoPoller
 from trading_harness.market_data.snapshot_candles import synthesize_5m_candles
 from trading_harness.scanner_engine import LiveScannerEngine
-from trading_harness.alert_journal import TradeAlertJournal
+from trading_harness.alert_journal import TradeAlertJournal, group_alert_episodes
 
 # -----------------------------------------------------------------------------
 # Streamlit Page Configuration
@@ -655,69 +655,111 @@ for sym in selected_symbols:
 # Sort setups: High confidence first, then best R:R
 all_identified_setups.sort(key=lambda s: (s["confidence"] == "HIGH", s["rr_numeric"]), reverse=True)
 
-# Keep the first snapshot of each distinct setup for the current trading day.
-# Changed entry or target prices create a separate alert.
 alert_date = ist_now.date().isoformat()
-if st.session_state.get("trade_alert_date") != alert_date:
-    st.session_state.trade_alert_date = alert_date
-    st.session_state.trade_alerts = {}
-elif "trade_alerts" not in st.session_state:
-    st.session_state.trade_alerts = {}
-
 for setup in all_identified_setups:
-    alert_key = (
-        setup["symbol"],
-        setup["strategy"],
-        setup["side"],
-        round(setup["entry_price"], 2),
-        round(setup["target"], 2),
-    )
-    st.session_state.trade_alerts.setdefault(alert_key, dict(setup))
-    trade_alert_journal.log_alert(st.session_state.trade_alerts[alert_key])
+    trade_alert_journal.log_alert(setup)
 
-trade_alerts = sorted(
-    st.session_state.trade_alerts.values(),
+current_alert_groups = {}
+for setup in all_identified_setups:
+    key = (setup["symbol"], setup["side"])
+    group = current_alert_groups.get(key)
+    if group is None:
+        group = dict(setup)
+        group["strategy_rationales"] = {
+            setup["strategy"]: setup.get("rationale", "")
+        }
+        current_alert_groups[key] = group
+        continue
+
+    group["strategy_rationales"][setup["strategy"]] = setup.get("rationale", "")
+    if (setup["confidence"] == "HIGH", setup["rr_numeric"]) > (
+        group["confidence"] == "HIGH", group["rr_numeric"]
+    ):
+        for field in (
+            "strategy", "entry_price", "stop_loss", "target", "risk_reward",
+            "rr_numeric", "quantity", "max_risk_inr",
+            "potential_reward_inr", "confidence",
+        ):
+            group[field] = setup[field]
+    if setup.get("data_quality") == "ESTIMATED":
+        group["data_quality"] = "ESTIMATED"
+
+current_snapshot_alerts = sorted(
+    current_alert_groups.values(),
     key=lambda setup: (setup["confidence"] == "HIGH", setup["rr_numeric"]),
     reverse=True,
 )
-current_snapshot_alerts = [
-    setup for setup in trade_alerts
-    if setup["timestamp"] == latest_snapshot_timestamp
-]
-earlier_snapshot_alerts = sorted(
-    (
-        setup for setup in trade_alerts
-        if setup["timestamp"] != latest_snapshot_timestamp
-    ),
-    key=lambda setup: setup["timestamp"],
-    reverse=True,
-)
+for setup in current_snapshot_alerts:
+    setup["strategies"] = sorted(setup["strategy_rationales"])
+    setup["rationale"] = " | ".join(
+        f"{strategy}: {rationale}"
+        for strategy, rationale in sorted(setup["strategy_rationales"].items())
+        if rationale
+    )
+
+history_episodes = group_alert_episodes(trade_alert_journal.read_alerts(alert_date))
+active_snapshot_times = {
+    (setup["symbol"], setup["side"]): pd.to_datetime(setup["timestamp"])
+    for setup in current_snapshot_alerts
+}
+earlier_snapshot_alerts = []
+for episode in history_episodes:
+    active_time = active_snapshot_times.get((episode["symbol"], episode["side"]))
+    episode_last_seen = pd.to_datetime(episode["last_seen"])
+    if (
+        active_time is not None
+        and episode_last_seen <= active_time
+        and active_time - episode_last_seen <= pd.Timedelta(minutes=15)
+    ):
+        continue
+    episode["data_quality"] = (
+        "ESTIMATED"
+        if any(
+            "ESTIMATED snapshot-derived bars" in rationale
+            for rationale in episode.get("strategy_rationales", {}).values()
+        )
+        else "VERIFIED"
+    )
+    earlier_snapshot_alerts.append(episode)
 
 
 def render_trade_alert_list(setups):
     rows = []
     for setup in setups:
         side_class = "trade-alert-buy" if setup["side"] == "BUY" else "trade-alert-sell"
-        rationale = html.escape(setup.get("rationale", ""), quote=True)
+        strategy_rationales = setup.get("strategy_rationales", {})
+        strategy_names = setup.get("strategies", [setup["strategy"]])
+        tooltip = "\n".join(
+            f"{strategy}: {strategy_rationales.get(strategy, setup.get('rationale', ''))}"
+            for strategy in strategy_names
+        )
+        rationale = html.escape(tooltip, quote=True)
+        strategy_label = " · ".join(strategy_names)
+        time_label = setup.get("start_timestamp", setup.get("timestamp", ""))
+        last_seen = setup.get("last_seen")
+        if last_seen and last_seen != time_label:
+            time_label += f" – {last_seen[11:16]}"
+        if setup.get("updates"):
+            time_label += f" ({setup['updates']} updates)"
         rows.append(
             "<div class='trade-alert-row'>"
-            f"<span>{html.escape(setup['timestamp'])}</span>"
+            f"<span>{html.escape(time_label)}</span>"
             f"<span class='trade-alert-symbol'>{html.escape(setup['symbol'])}</span>"
             f"<span class='{side_class}'>{html.escape(setup['side'])}</span>"
-            f"<span title='{rationale}'>{html.escape(setup['strategy'])}"
+            f"<span title='{rationale}'>{html.escape(strategy_label)}"
             f"{' ⚠ ESTIMATED' if setup.get('data_quality') == 'ESTIMATED' else ''} ⓘ</span>"
-            f"<span>₹{setup['entry_price']:,.2f}</span>"
-            f"<span>₹{setup['stop_loss']:,.2f}</span>"
-            f"<span>₹{setup['target']:,.2f}</span>"
+            f"<span>₹{float(setup['entry_price']):,.2f}</span>"
+            f"<span>₹{float(setup['stop_loss']):,.2f}</span>"
+            f"<span>₹{float(setup['target']):,.2f}</span>"
             f"<span>{setup['risk_reward']}</span>"
-            f"<span>{setup['quantity']}</span>"
+            f"<span>{int(float(setup['quantity']))}</span>"
             "</div>"
         )
 
     st.markdown(
         "<div class='trade-alert-pane'>"
         "<div class='trade-alert-row trade-alert-header'>"
-        "<span>Snapshot time (IST)</span><span>Symbol</span><span>Side</span>"
+        "<span>Episode (IST)</span><span>Symbol</span><span>Side</span>"
         "<span>Strategy</span><span>Entry</span><span>Stop loss</span>"
         "<span>Target</span><span>Risk:Reward</span><span>Quantity</span>"
         "</div>"
@@ -733,16 +775,18 @@ def render_trade_alert_list(setups):
 st.markdown("---")
 st.subheader("🎯 Trade Setup Recommendations")
 st.markdown(
-    f"**Current snapshot** — {latest_snapshot_timestamp or 'No snapshot available'} "
-    f"({len(current_snapshot_alerts)} setups)"
+    f"**Active setups** — latest snapshot {latest_snapshot_timestamp or 'unavailable'} "
+    f"({len(current_snapshot_alerts)} symbol/direction groups)"
 )
 render_trade_alert_list(current_snapshot_alerts)
 
-st.markdown(
-    f"**Earlier snapshots** — newest first ({len(earlier_snapshot_alerts)} setups)"
+with st.expander(f"Setup history ({len(earlier_snapshot_alerts)} episodes)", expanded=False):
+    render_trade_alert_list(earlier_snapshot_alerts)
+st.caption(
+    "Active calls are combined by symbol and direction; strategy names are grouped "
+    "together and levels show the strongest current setup. Price-only changes are "
+    "suppressed from the journal for 15 minutes; a later reappearance starts a new episode."
 )
-render_trade_alert_list(earlier_snapshot_alerts)
-st.caption("Identical calls keep their original snapshot time and details; changed entry or target values are separate alerts. Hover over a strategy to read its rationale.")
 st.caption(
     f"Trade calls are recorded in `{trade_alert_journal.path}`, deduplicated by day, "
     "symbol, strategy, side, entry, and target; completed daily files move to `logs/archive/`."
