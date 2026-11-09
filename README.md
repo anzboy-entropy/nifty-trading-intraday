@@ -288,6 +288,7 @@ The harness includes a built-in automated scraper ([`trading_harness/market_data
   - High-speed JSON cache updated continuously for sub-millisecond retrieval by Claude or trading strategies.
 - **End-of-Day (EOD) Archive**: `data/archive/nifty50_YYYY-MM-DD.csv`
   - The current date's file remains available after the market closes and is archived when a later date starts. If the app was offline, it archives completed-day files on the next startup. `Archive EOD` can archive the current date manually.
+  - If the current date was manually archived and the app restarts or polls again on that date, the archive is restored to the single live daily file before new rows are appended. If live and archived copies both exist, rows are merged and duplicate snapshot/symbol records are removed.
   - Each new trading date writes to a new date-stamped file; snapshots are not carried into the next day's file.
 
 ### 2. Running the Collector CLI

@@ -10,6 +10,7 @@ import time
 import json
 import csv
 import shutil
+import tempfile
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -68,6 +69,7 @@ class NSELiveCollector:
         self._ensure_directories()
         self._migrate_legacy_running_file()
         self.check_and_perform_eod_archive()
+        self._restore_archived_file(self.get_ist_now().date().isoformat())
 
     @property
     def running_file_path(self) -> str:
@@ -205,6 +207,7 @@ class NSELiveCollector:
             datetime.strptime(date_tag, "%Y-%m-%d")
         except ValueError as exc:
             raise ValueError(f"Invalid snapshot date: {date_tag}") from exc
+        self._restore_archived_file(date_tag)
         daily_path = self.daily_file_path(date_tag)
         file_exists = os.path.exists(daily_path) and os.path.getsize(daily_path) > 0
 
@@ -238,7 +241,10 @@ class NSELiveCollector:
         if not os.path.exists(running_path) or os.path.getsize(running_path) == 0:
             return None
 
-        archived_path = os.path.join(self.archive_dir, f"nifty50_{date_tag}.csv")
+        archived_path = os.path.join(
+            self.archive_dir,
+            f"{self.running_file_prefix}_{date_tag}.csv",
+        )
         if os.path.exists(archived_path):
             self._merge_snapshot_files(archived_path, running_path)
             os.remove(running_path)
@@ -248,25 +254,56 @@ class NSELiveCollector:
         print(f"[NSELiveCollector] [ARCHIVE] Moved running file to: {archived_path}")
         return archived_path
 
+    def _restore_archived_file(self, date_tag: str) -> Optional[str]:
+        """Restore a date's archive to live storage, merging any split live rows."""
+        archived_path = os.path.join(
+            self.archive_dir,
+            f"{self.running_file_prefix}_{date_tag}.csv",
+        )
+        daily_path = self.daily_file_path(date_tag)
+        if not os.path.exists(archived_path):
+            return None
+
+        if os.path.exists(daily_path):
+            self._merge_snapshot_files(daily_path, archived_path)
+            os.remove(archived_path)
+        else:
+            shutil.move(archived_path, daily_path)
+        print(f"[NSELiveCollector] [RESTORE] Recovered daily file: {daily_path}")
+        return daily_path
+
     @staticmethod
-    def _merge_snapshot_files(archive_path: str, daily_path: str) -> None:
-        with open(archive_path, "r", newline="", encoding="utf-8") as archived_file:
-            existing = list(csv.DictReader(archived_file))
-        existing_keys = {
-            (row.get("snapshot_ist", ""), row.get("symbol", ""))
-            for row in existing
-        }
-        with open(daily_path, "r", newline="", encoding="utf-8") as daily_file:
-            additions = []
-            for row in csv.DictReader(daily_file):
+    def _merge_snapshot_files(destination_path: str, source_path: str) -> None:
+        """Merge chronologically, preserving one row per snapshot timestamp and symbol."""
+        with open(destination_path, "r", newline="", encoding="utf-8") as destination_file:
+            records = {
+                (row.get("snapshot_ist", ""), row.get("symbol", "")): row
+                for row in csv.DictReader(destination_file)
+            }
+        original_count = len(records)
+        with open(source_path, "r", newline="", encoding="utf-8") as source_file:
+            for row in csv.DictReader(source_file):
                 key = (row.get("snapshot_ist", ""), row.get("symbol", ""))
-                if key not in existing_keys:
-                    additions.append(row)
-                    existing_keys.add(key)
-        if additions:
-            with open(archive_path, "a", newline="", encoding="utf-8") as archived_file:
-                writer = csv.DictWriter(archived_file, fieldnames=CSV_HEADERS)
-                writer.writerows(additions)
+                records.setdefault(key, row)
+        if len(records) > original_count:
+            ordered_records = sorted(
+                records.values(),
+                key=lambda row: (row.get("snapshot_ist", ""), row.get("symbol", "")),
+            )
+            descriptor, temp_path = tempfile.mkstemp(
+                prefix=".snapshot-merge-",
+                suffix=".csv",
+                dir=os.path.dirname(destination_path) or ".",
+            )
+            try:
+                with os.fdopen(descriptor, "w", newline="", encoding="utf-8") as destination_file:
+                    writer = csv.DictWriter(destination_file, fieldnames=CSV_HEADERS)
+                    writer.writeheader()
+                    writer.writerows(ordered_records)
+                os.replace(temp_path, destination_path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
 
     def _migrate_legacy_running_file(self) -> None:
         if not os.path.exists(self.legacy_running_file_path):

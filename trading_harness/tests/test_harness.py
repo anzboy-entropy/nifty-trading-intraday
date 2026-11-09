@@ -287,5 +287,80 @@ class TestTradingHarness(unittest.TestCase):
             self.assertEqual(archived, [])
             self.assertTrue(os.path.exists(daily_path))
 
+    def test_nse_collector_restores_same_day_archive_before_restart_poll(self):
+        import csv
+        from trading_harness.market_data.nse_live_collector import (
+            CSV_HEADERS,
+            NSELiveCollector,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            live_dir = os.path.join(temp_dir, "live")
+            archive_dir = os.path.join(temp_dir, "archive")
+            collector = NSELiveCollector(
+                live_dir=live_dir,
+                archive_dir=archive_dir,
+            )
+            date_tag = collector.get_ist_now().date().isoformat()
+
+            def record(timestamp, symbol="NIFTY 50", price=24000.0):
+                return {
+                    "snapshot_ist": f"{date_tag} {timestamp}",
+                    "symbol": symbol,
+                    "is_index": symbol == "NIFTY 50",
+                    "company_name": symbol,
+                    "last_price": price,
+                    "change": 100.0,
+                    "p_change": 0.4,
+                    "open": 23900.0,
+                    "day_high": price,
+                    "day_low": 23900.0,
+                    "prev_close": 23900.0,
+                    "volume": 1000000,
+                    "total_traded_value": 50000000.0,
+                    "year_high": 26000.0,
+                    "year_low": 22000.0,
+                    "nse_timestamp": timestamp,
+                }
+
+            collector.append_to_running_file([record("09:15:00")])
+            archived_path = collector.archive_running_file(date_tag)
+            self.assertTrue(os.path.exists(archived_path))
+
+            split_live_path = collector.daily_file_path(date_tag)
+            with open(split_live_path, "w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=CSV_HEADERS)
+                writer.writeheader()
+                writer.writerow(record("09:20:00", price=24010.0))
+
+            restarted_collector = NSELiveCollector(
+                live_dir=live_dir,
+                archive_dir=archive_dir,
+            )
+            daily_path = restarted_collector.daily_file_path(date_tag)
+            self.assertTrue(os.path.exists(daily_path))
+            self.assertFalse(os.path.exists(archived_path))
+
+            restarted_collector.append_to_running_file([
+                record("09:25:00", price=24020.0),
+            ])
+
+            with open(daily_path, "r", newline="", encoding="utf-8") as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(
+                {row["snapshot_ist"] for row in rows},
+                {
+                    f"{date_tag} 09:15:00",
+                    f"{date_tag} 09:20:00",
+                    f"{date_tag} 09:25:00",
+                },
+            )
+            self.assertEqual(
+                [row["snapshot_ist"] for row in rows],
+                sorted(row["snapshot_ist"] for row in rows),
+            )
+            self.assertFalse(os.path.exists(archived_path))
+
 if __name__ == "__main__":
     unittest.main()
