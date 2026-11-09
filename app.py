@@ -7,14 +7,12 @@ setups across enabled intraday strategies.
 import os
 import sys
 import time
-import json
 import html
 import pandas as pd
-import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 # Ensure workspace root is in path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
@@ -512,10 +510,11 @@ with st.sidebar.expander("Dashboard refresh", expanded=False):
     refresh_interval = st.selectbox(
         "Refresh Interval",
         options=[10, 30, 60, 180],
-        index=1,
+        index=2,
         format_func=lambda seconds: f"Every {seconds} seconds",
         key="dashboard_refresh_interval",
     )
+    st.caption("UI refresh reruns the dashboard; NSE polling remains on its separate 5-minute schedule.")
 
 # Load running data
 scanner = LiveScannerEngine(capital=capital, risk_pct=risk_pct_val)
@@ -634,7 +633,10 @@ st.session_state.selected_symbols = selected_symbols
 # Strategy Scanner Engine: Probing Selected Stocks
 # -----------------------------------------------------------------------------
 all_identified_setups = []
-symbol_series_cache = {}
+snapshot_strategies = [
+    strategy for strategy in selected_strategies
+    if strategy != "Supply & Demand (5m)"
+]
 latest_snapshot_timestamp = (
     str(df_running["snapshot_ist"].dropna().astype(str).max())
     if not df_running.empty and "snapshot_ist" in df_running.columns
@@ -644,11 +646,6 @@ latest_snapshot_timestamp = (
 for sym in selected_symbols:
     series = scanner.get_symbol_time_series(df_running, sym)
     if not series.empty:
-        symbol_series_cache[sym] = series
-        snapshot_strategies = [
-            strategy for strategy in selected_strategies
-            if strategy != "Supply & Demand (5m)"
-        ]
         setups = scanner.scan_symbol_setups(
             series,
             sym,
@@ -673,10 +670,7 @@ for sym in selected_symbols:
                     sym,
                     active_strategies=["Supply & Demand (5m)"],
                 ))
-        symbol_snapshots = df_running.loc[
-            df_running["symbol"] == sym, "snapshot_ist"
-        ].dropna().astype(str)
-        latest_snapshot = symbol_snapshots.max()
+        latest_snapshot = str(series["snapshot_ist"].iloc[-1])
         for setup in setups:
             setup["timestamp"] = str(latest_snapshot)
         all_identified_setups.extend(setups)

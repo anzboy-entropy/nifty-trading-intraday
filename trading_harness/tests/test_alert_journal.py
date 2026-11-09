@@ -51,6 +51,43 @@ class TestTradeAlertJournal(unittest.TestCase):
         reopened_journal = TradeAlertJournal(self.path)
         self.assertFalse(reopened_journal.log_alert(self.setup))
 
+    def test_date_partitioned_journal_loads_only_current_day_timestamps(self):
+        archive_dir = os.path.join(self.temp_dir.name, "archive")
+        base_path = os.path.join(self.temp_dir.name, "trade_alerts.csv")
+        today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date()
+        yesterday = today - timedelta(days=1)
+        current_record = {
+            key: value for key, value in self.setup.items() if key != "timestamp"
+        }
+        current_record["snapshot_ist"] = f"{today.isoformat()} 10:15:00"
+        old_record = dict(current_record)
+        old_record["snapshot_ist"] = f"{yesterday.isoformat()} 10:15:00"
+
+        os.makedirs(archive_dir)
+        for path, record in (
+            (os.path.join(self.temp_dir.name, f"trade_alerts_{today}.csv"), current_record),
+            (os.path.join(archive_dir, f"trade_alerts_{yesterday}.csv"), old_record),
+        ):
+            with open(path, "w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=TradeAlertJournal.FIELDNAMES)
+                writer.writeheader()
+                writer.writerow(record)
+
+        journal = TradeAlertJournal(
+            base_path,
+            archive_dir=archive_dir,
+            date_partitioned=True,
+        )
+
+        self.assertIn(
+            (today.isoformat(), "RELIANCE", "Momentum Trading", "BUY"),
+            journal._episode_seen_at,
+        )
+        self.assertNotIn(
+            (yesterday.isoformat(), "RELIANCE", "Momentum Trading", "BUY"),
+            journal._episode_seen_at,
+        )
+
     def test_price_updates_are_suppressed_until_a_new_episode(self):
         journal = TradeAlertJournal(self.path)
 

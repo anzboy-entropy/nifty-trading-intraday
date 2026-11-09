@@ -157,14 +157,26 @@ class TradeAlertJournal:
         if not os.path.isdir(self._directory):
             return
         prefixes = (f"{self._stem}_",)
-        paths = [self._legacy_path] if not self._date_partitioned and os.path.exists(self._legacy_path) else []
-        for filename in os.listdir(self._directory):
-            if filename.startswith(prefixes) and filename.endswith(".csv"):
-                paths.append(os.path.join(self._directory, filename))
-        if os.path.isdir(self.archive_dir):
-            for filename in os.listdir(self.archive_dir):
+        if self._date_partitioned:
+            today = datetime.now(IST).date().isoformat()
+            today_filename = f"{self._stem}_{today}.csv"
+            paths = [
+                path for path in (
+                    os.path.join(self._directory, today_filename),
+                    os.path.join(self.archive_dir, today_filename),
+                )
+                if os.path.exists(path)
+            ]
+        else:
+            paths = [self._legacy_path] if os.path.exists(self._legacy_path) else []
+            for filename in os.listdir(self._directory):
                 if filename.startswith(prefixes) and filename.endswith(".csv"):
-                    paths.append(os.path.join(self.archive_dir, filename))
+                    paths.append(os.path.join(self._directory, filename))
+            if os.path.isdir(self.archive_dir):
+                for filename in os.listdir(self.archive_dir):
+                    if filename.startswith(prefixes) and filename.endswith(".csv"):
+                        paths.append(os.path.join(self.archive_dir, filename))
+
         for path in paths:
             with open(path, "r", newline="", encoding="utf-8") as file:
                 for record in csv.DictReader(file):
@@ -213,6 +225,14 @@ class TradeAlertJournal:
         with self._lock:
             episode_key = self._episode_key(setup)
             date_str = episode_key[0]
+            if self._date_partitioned and any(
+                key[0] != date_str for key in self._episode_seen_at
+            ):
+                self._episode_seen_at = {
+                    key: timestamp
+                    for key, timestamp in self._episode_seen_at.items()
+                    if key[0] == date_str
+                }
             snapshot_time = self._parse_timestamp(str(setup.get("timestamp", "")))
             if snapshot_time is None:
                 raise ValueError(f"Invalid trade-alert timestamp: {setup.get('timestamp')}")
