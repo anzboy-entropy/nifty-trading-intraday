@@ -138,59 +138,72 @@ class NSELiveCollector:
             "Accept": "application/json, text/plain, */*",
             "X-Requested-With": "XMLHttpRequest"
         }
+        last_error = "NSE did not return a response"
 
         for attempt in range(retries + 1):
             try:
                 resp = self.session.get(self.API_URL, headers=headers, verify=False, timeout=15)
-                
-                # If session expired or blocked, refresh cookies and retry
-                if resp.status_code in [401, 403, 404]:
-                    self.init_session()
+
+                if resp.status_code != 200:
+                    response_hint = " ".join((getattr(resp, "text", "") or "").split())[:160]
+                    last_error = f"NSE returned HTTP {resp.status_code}"
+                    if response_hint:
+                        last_error = f"{last_error}: {response_hint}"
+
+                    retryable = (
+                        resp.status_code in (401, 403, 429)
+                        or resp.status_code >= 500
+                    )
+                    if resp.status_code in (401, 403) and attempt < retries:
+                        self.init_session()
+                    if not retryable or attempt == retries:
+                        return False, [], last_error
+                    time.sleep(min(2 ** attempt, 8))
                     continue
 
-                if resp.status_code == 200:
-                    raw_data = resp.json()
-                    data_container = raw_data.get("data", {})
-                    items = data_container.get("data", [])
-                    nse_time = data_container.get("timestamp", "")
+                raw_data = resp.json()
+                data_container = raw_data.get("data", {})
+                items = data_container.get("data", [])
+                nse_time = data_container.get("timestamp", "")
 
-                    if not items:
-                        return False, [], "No items in response"
+                if not items:
+                    return False, [], "NSE response contained no market data"
 
-                    snapshot_time = self.get_ist_now().strftime("%Y-%m-%d %H:%M:%S")
-                    parsed_records = []
+                snapshot_time = self.get_ist_now().strftime("%Y-%m-%d %H:%M:%S")
+                parsed_records = []
 
-                    for idx, item in enumerate(items):
-                        is_index = (idx == 0) or (item.get("symbol") == "NIFTY 50")
-                        rec = {
-                            "snapshot_ist": snapshot_time,
-                            "symbol": item.get("symbol"),
-                            "is_index": is_index,
-                            "company_name": item.get("companyName", "NIFTY 50 INDEX" if is_index else ""),
-                            "last_price": float(item.get("lastPrice", 0.0) or 0.0),
-                            "change": float(item.get("change", 0.0) or 0.0),
-                            "p_change": float(item.get("pChange", 0.0) or 0.0),
-                            "open": float(item.get("open", 0.0) or 0.0),
-                            "day_high": float(item.get("dayHigh", 0.0) or 0.0),
-                            "day_low": float(item.get("dayLow", 0.0) or 0.0),
-                            "prev_close": float(item.get("previousClose", 0.0) or 0.0),
-                            "volume": int(item.get("totalTradedVolume", 0) or 0),
-                            "total_traded_value": float(item.get("totalTradedValue", 0.0) or 0.0),
-                            "year_high": float(item.get("yearHigh", 0.0) or 0.0),
-                            "year_low": float(item.get("yearLow", 0.0) or 0.0),
-                            "nse_timestamp": item.get("lastUpdateTime") or nse_time
-                        }
-                        parsed_records.append(rec)
+                for idx, item in enumerate(items):
+                    is_index = (idx == 0) or (item.get("symbol") == "NIFTY 50")
+                    rec = {
+                        "snapshot_ist": snapshot_time,
+                        "symbol": item.get("symbol"),
+                        "is_index": is_index,
+                        "company_name": item.get("companyName", "NIFTY 50 INDEX" if is_index else ""),
+                        "last_price": float(item.get("lastPrice", 0.0) or 0.0),
+                        "change": float(item.get("change", 0.0) or 0.0),
+                        "p_change": float(item.get("pChange", 0.0) or 0.0),
+                        "open": float(item.get("open", 0.0) or 0.0),
+                        "day_high": float(item.get("dayHigh", 0.0) or 0.0),
+                        "day_low": float(item.get("dayLow", 0.0) or 0.0),
+                        "prev_close": float(item.get("previousClose", 0.0) or 0.0),
+                        "volume": int(item.get("totalTradedVolume", 0) or 0),
+                        "total_traded_value": float(item.get("totalTradedValue", 0.0) or 0.0),
+                        "year_high": float(item.get("yearHigh", 0.0) or 0.0),
+                        "year_low": float(item.get("yearLow", 0.0) or 0.0),
+                        "nse_timestamp": item.get("lastUpdateTime") or nse_time
+                    }
+                    parsed_records.append(rec)
 
-                    return True, parsed_records, nse_time
+                return True, parsed_records, nse_time
 
             except Exception as e:
+                last_error = f"NSE request failed: {e}"
                 if attempt == retries:
-                    return False, [], str(e)
-                time.sleep(2)
+                    return False, [], last_error
+                time.sleep(min(2 ** attempt, 8))
                 self.init_session()
 
-        return False, [], "Max retries exceeded"
+        return False, [], last_error
 
     def append_to_running_file(self, records: List[Dict[str, Any]]):
         """
